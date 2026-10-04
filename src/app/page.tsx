@@ -7,7 +7,6 @@ import {
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Toaster } from '@/components/ui/toaster'
 import { toast } from 'sonner'
 import { RunForm } from '@/components/hole/RunForm'
@@ -18,7 +17,7 @@ import { ResultsPanel } from '@/components/hole/ResultsPanel'
 import { DEFAULT_PARAMS, type RunParams, type RunResult, type HoleSphere, type HoleSurface } from '@/lib/hole/types'
 import { HoleViewer, type HoleViewerOptions } from '@/lib/hole/viewer'
 import {
-  fetchHealth, fetchRadSets, fetchExamples, runHole, examplePdbUrl,
+  fetchHealth, fetchRadSets, fetchExamples, runHole, examplePdbUrl, fetchPdbId,
   type ExampleInfo, type RadSetInfo,
 } from '@/lib/hole/api'
 
@@ -31,9 +30,10 @@ export default function Home() {
   const [pdbName, setPdbName] = useState('')
   const [pdbText, setPdbText] = useState<string | null>(null)
   const [customRad, setCustomRad] = useState<File | null>(null)
+  const [fetchingPdb, setFetchingPdb] = useState(false)
 
   // backend metadata
-  const [radSets, setRadSets] = useState<string[]>(['simple'])
+  const [radSets, setRadSets] = useState<RadSetInfo>({ rad_sets: [{ name: 'simple', description: 'Simple AMBER vdw radii' }], default: 'simple' })
   const [examples, setExamples] = useState<ExampleInfo[]>([])
   const [serviceReady, setServiceReady] = useState<boolean | null>(null)
 
@@ -45,10 +45,11 @@ export default function Home() {
   // viewer state
   const [viewerOpts, setViewerOpts] = useState<HoleViewerOptions>({
     showCartoon: true,
-    showBallStick: true,
+    showBallStick: false,
     showSurface: true,
     showSpheres: false,
     showCentreLine: true,
+    showPoreSideChains: true,
     surfaceOpacity: 0.85,
     sphereScale: 1.0,
   })
@@ -57,16 +58,16 @@ export default function Home() {
   // Fetch backend metadata on mount
   useEffect(() => {
     fetchHealth().then((h) => setServiceReady(h.env_ready)).catch(() => setServiceReady(false))
-    fetchRadSets().then((r: RadSetInfo) => setRadSets(r.rad_sets)).catch(() => {})
+    fetchRadSets().then((r: RadSetInfo) => setRadSets(r)).catch(() => {})
     fetchExamples().then(setExamples).catch(() => {})
   }, [])
 
-  // Load PDB text into the viewer when a new file is picked
+  // Load PDB/CIF text into the viewer when a new file is picked
   useEffect(() => {
     if (!pdbFile) { setPdbText(null); return }
     const reader = new FileReader()
     reader.onload = () => setPdbText(typeof reader.result === 'string' ? reader.result : null)
-    reader.onerror = () => toast.error('Could not read PDB file')
+    reader.onerror = () => toast.error('Could not read structure file')
     reader.readAsText(pdbFile)
   }, [pdbFile])
 
@@ -132,6 +133,24 @@ export default function Home() {
     setPdbFile(null); setPdbName(''); setPdbText(null)
     setCustomRad(null)
     setResult(null); setError(null)
+  }, [])
+
+  // Fetch a structure from RCSB by its 4-character PDB ID.
+  // The Python service proxies the request (avoids CORS) and returns the
+  // raw PDB or mmCIF text.
+  const handleFetchPdbId = useCallback(async (pdbId: string) => {
+    setFetchingPdb(true)
+    try {
+      const res = await fetchPdbId(pdbId)
+      const file = new File([res.content], res.filename, { type: 'text/plain' })
+      setPdbFile(file)
+      setPdbName(res.filename)
+      toast.success(`Fetched ${res.pdb_id.toUpperCase()}.${res.format} (${(res.size / 1024).toFixed(1)} KB)`)
+    } catch (e) {
+      toast.error((e as Error).message)
+    } finally {
+      setFetchingPdb(false)
+    }
   }, [])
 
   const spheres: HoleSphere[] = useMemo(() => result?.spheres ?? [], [result])
@@ -232,70 +251,62 @@ export default function Home() {
               radSets={radSets}
               examples={examples}
               onPickExample={handlePickExample}
+              onFetchPdbId={handleFetchPdbId}
+              fetchingPdb={fetchingPdb}
               onRun={handleRun}
               onReset={handleReset}
               running={running}
             />
           </div>
 
-          {/* Middle: 3D viewer + profile chart */}
+          {/* Middle: 3D viewer (top) + pore profile (bottom), both visible */}
           <div className="space-y-4">
-            <Tabs defaultValue="viewer" className="w-full">
-              <TabsList className="grid w-full grid-cols-2">
-                <TabsTrigger value="viewer" className="gap-1.5 text-xs">
-                  <BoxSelect className="size-3.5" /> 3D viewer
-                </TabsTrigger>
-                <TabsTrigger value="profile" className="gap-1.5 text-xs">
-                  <Activity className="size-3.5" /> Pore profile
-                </TabsTrigger>
-              </TabsList>
-              <TabsContent value="viewer" className="mt-2">
-                <div className="relative h-[60vh] min-h-[420px] overflow-hidden rounded-xl border border-border/60 bg-[#0b1220]">
-                  {pdbText ? (
-                    <Viewer3D
-                      pdbText={pdbText}
-                      spheres={spheres}
-                      surface={surface}
-                      centreline={centreline}
-                      options={viewerOpts}
-                      bgColor="#0b1220"
-                      onReady={(v) => { viewerRef.current = v }}
-                    />
-                  ) : (
-                    <div className="flex h-full flex-col items-center justify-center gap-3 text-center text-slate-400">
-                      <BoxSelect className="size-12 opacity-30" />
-                      <div>
-                        <p className="text-sm font-medium">No structure loaded</p>
-                        <p className="text-xs opacity-70">Upload a PDB file or pick an example to begin.</p>
-                      </div>
-                    </div>
-                  )}
-                  {running && (
-                    <div className="absolute inset-0 flex items-center justify-center bg-background/60 backdrop-blur-sm">
-                      <div className="flex flex-col items-center gap-2 text-foreground">
-                        <Loader2 className="size-8 animate-spin text-emerald-500" />
-                        <p className="text-sm font-medium">Running HOLE2…</p>
-                      </div>
-                    </div>
-                  )}
+            {/* 3D viewer */}
+            <div className="relative h-[50vh] min-h-[380px] overflow-hidden rounded-xl border border-border/60 bg-[#0b1220]">
+              {pdbText ? (
+                <Viewer3D
+                  pdbText={pdbText}
+                  pdbName={pdbName}
+                  spheres={spheres}
+                  surface={surface}
+                  centreline={centreline}
+                  options={viewerOpts}
+                  bgColor="#0b1220"
+                  onReady={(v) => { viewerRef.current = v }}
+                />
+              ) : (
+                <div className="flex h-full flex-col items-center justify-center gap-3 text-center text-slate-400">
+                  <BoxSelect className="size-12 opacity-30" />
+                  <div>
+                    <p className="text-sm font-medium">No structure loaded</p>
+                    <p className="text-xs opacity-70">Upload a PDB/CIF file, fetch by ID, or pick an example.</p>
+                  </div>
                 </div>
-              </TabsContent>
-              <TabsContent value="profile" className="mt-2">
-                <div className="h-[60vh] min-h-[420px] rounded-xl border border-border/60 bg-card p-4">
-                  {profile ? (
-                    <ProfileChart profile={profile} />
-                  ) : (
-                    <div className="flex h-full flex-col items-center justify-center gap-3 text-center text-muted-foreground">
-                      <Activity className="size-12 opacity-30" />
-                      <div>
-                        <p className="text-sm font-medium">No profile yet</p>
-                        <p className="text-xs opacity-70">Run HOLE2 to see the pore-radius vs. channel-coordinate plot.</p>
-                      </div>
-                    </div>
-                  )}
+              )}
+              {running && (
+                <div className="absolute inset-0 flex items-center justify-center bg-background/60 backdrop-blur-sm">
+                  <div className="flex flex-col items-center gap-2 text-foreground">
+                    <Loader2 className="size-8 animate-spin text-emerald-500" />
+                    <p className="text-sm font-medium">Running HOLE2…</p>
+                  </div>
                 </div>
-              </TabsContent>
-            </Tabs>
+              )}
+            </div>
+
+            {/* Pore profile chart (always visible below the 3D viewer) */}
+            <div className="h-[32vh] min-h-[240px] rounded-xl border border-border/60 bg-card p-3">
+              {profile ? (
+                <ProfileChart profile={profile} />
+              ) : (
+                <div className="flex h-full flex-col items-center justify-center gap-2 text-center text-muted-foreground">
+                  <Activity className="size-8 opacity-30" />
+                  <div>
+                    <p className="text-sm font-medium">No profile yet</p>
+                    <p className="text-xs opacity-70">Run HOLE2 to see the pore-radius vs. channel-coordinate plot.</p>
+                  </div>
+                </div>
+              )}
+            </div>
 
             {/* Mobile/tablet results below the viewer */}
             <div className="lg:hidden">

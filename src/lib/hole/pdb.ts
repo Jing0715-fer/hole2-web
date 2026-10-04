@@ -42,6 +42,8 @@ export interface PdbResidue {
   hetero: boolean
   start: number // atom index (inclusive)
   end: number   // atom index (exclusive)
+  /** Secondary structure from HELIX/SHEET records (or computed): 'H' helix, 'E' sheet, 'L' loop */
+  ss: 'H' | 'E' | 'L'
 }
 
 export interface PdbChain {
@@ -55,6 +57,8 @@ export interface PdbStructure {
   residues: PdbResidue[]
   chains: PdbChain[]
   title: string
+  /** True if the file contained HELIX/SHEET records (otherwise SS was guessed from geometry). */
+  ssFromRecords: boolean
 }
 
 const PROTEIN_3TO1: Record<string, string> = {
@@ -132,6 +136,7 @@ export function elementFromAtomName(name: string, resName: string): string {
 export function parsePDB(text: string): PdbStructure {
   const atoms: PdbAtom[] = []
   const residues: PdbResidue[] = []
+  const ssRecords: Map<string, 'H' | 'E'> = new Map()  // key: chainId+resSeq → SS
   let title = ''
   const lines = text.split(/\r?\n/)
   for (const line of lines) {
@@ -143,6 +148,30 @@ export function parsePDB(text: string): PdbStructure {
     if (line.startsWith('TITLE')) {
       const t = line.substring(10).trim()
       if (t) title = (title ? title + ' ' : '') + t
+      continue
+    }
+    // Parse HELIX records: cols 20 chainID, 22-25 initSeqNum, 32 chainID, 34-37 endSeqNum
+    if (line.startsWith('HELIX')) {
+      const chainId = line.substring(19, 20).trim() || 'A'
+      const startSeq = parseInt(line.substring(21, 25).trim(), 10)
+      const endSeq = parseInt(line.substring(33, 37).trim(), 10)
+      if (!isNaN(startSeq) && !isNaN(endSeq)) {
+        for (let s = startSeq; s <= endSeq; s++) {
+          ssRecords.set(`${chainId}:${s}`, 'H')
+        }
+      }
+      continue
+    }
+    // Parse SHEET records: cols 22 chainID, 23-26 initSeqNum, 33 chainID, 34-37 endSeqNum
+    if (line.startsWith('SHEET')) {
+      const chainId = line.substring(21, 22).trim() || 'A'
+      const startSeq = parseInt(line.substring(22, 26).trim(), 10)
+      const endSeq = parseInt(line.substring(33, 37).trim(), 10)
+      if (!isNaN(startSeq) && !isNaN(endSeq)) {
+        for (let s = startSeq; s <= endSeq; s++) {
+          ssRecords.set(`${chainId}:${s}`, 'E')
+        }
+      }
       continue
     }
     if (!line.startsWith('ATOM') && !line.startsWith('HETATM')) continue
@@ -177,7 +206,8 @@ export function parsePDB(text: string): PdbStructure {
     const a = atoms[i]
     if (!cur || cur.chainId !== a.chainId || cur.resSeq !== a.resSeq || cur.resName !== a.resName || cur.hetero !== a.hetero) {
       if (cur) cur.end = i
-      cur = { chainId: a.chainId, resSeq: a.resSeq, resName: a.resName, hetero: a.hetero, start: i, end: i }
+      const ss = ssRecords.get(`${a.chainId}:${a.resSeq}`) ?? 'L'
+      cur = { chainId: a.chainId, resSeq: a.resSeq, resName: a.resName, hetero: a.hetero, start: i, end: i, ss }
       residues.push(cur)
     }
   }
@@ -195,7 +225,7 @@ export function parsePDB(text: string): PdbStructure {
     }
     curChain.residueIdx.push(i)
   }
-  return { atoms, residues, chains, title }
+  return { atoms, residues, chains, title, ssFromRecords: ssRecords.size > 0 }
 }
 
 /** Compute bonds by distance (1.0–1.9 Å for covalent).  O(n²) but capped. */
@@ -264,4 +294,232 @@ function computeBondsHashed(structure: PdbStructure, maxBonds: number): [number,
     }
   }
   return bonds
+}
+
+
+// ---------------------------------------------------------------------------
+// mmCIF parser (simplified)
+// ---------------------------------------------------------------------------
+
+/**
+ * Parse an mmCIF (PDBx/mmCIF) text file into a PdbStructure.
+ *
+ * mmCIF uses a `loop_` block with `_atom_site.*` column headers followed by
+ * whitespace-separated data rows.  We extract the same fields as the PDB
+ * parser and group them into residues/chains identically.
+ *
+ * Secondary structure is parsed from the `_struct_conf` table.
+ */
+export function parseCIF(text: string): PdbStructure {
+  const atoms: PdbAtom[] = []
+  const residues: PdbResidue[] = []
+  const ssRecords: Map<string, 'H' | 'E'> = new Map()
+  let title = ''
+
+  const titleMatch = text.match(/_struct\.title\s+'([^']*)'/)
+  if (titleMatch) title = titleMatch[1]
+
+  parseCifStructConf(text, ssRecords)
+
+  const atomLoop = extractCifLoop(text, '_atom_site.')
+  if (atomLoop) {
+    const { headers, rows } = atomLoop
+    const colIdx: Record<string, number> = {}
+    headers.forEach((h, i) => { colIdx[h] = i })
+    const groupCol = colIdx['_atom_site.group_PDB'] ?? -1
+    const typeCol = colIdx['_atom_site.type_symbol'] ?? -1
+    const labelCol = colIdx['_atom_site.label_atom_id'] ?? -1
+    const compCol = colIdx['_atom_site.label_comp_id'] ?? -1
+    const asymCol = colIdx['_atom_site.label_asym_id'] ?? -1
+    const authAsymCol = colIdx['_atom_site.auth_asym_id'] ?? -1
+    const seqCol = colIdx['_atom_site.label_seq_id'] ?? -1
+    const authSeqCol = colIdx['_atom_site.auth_seq_id'] ?? -1
+    const xCol = colIdx['_atom_site.Cartn_x'] ?? -1
+    const yCol = colIdx['_atom_site.Cartn_y'] ?? -1
+    const zCol = colIdx['_atom_site.Cartn_z'] ?? -1
+    const occCol = colIdx['_atom_site.occupancy'] ?? -1
+    const bfacCol = colIdx['_atom_site.B_iso_or_equiv'] ?? -1
+
+    for (const row of rows) {
+      if (row.length === 0) continue
+      const group = groupCol >= 0 ? row[groupCol] : 'ATOM'
+      const hetero = group === 'HETATM'
+      const name = labelCol >= 0 ? row[labelCol] : ''
+      const element = typeCol >= 0 ? row[typeCol] : elementFromAtomName(name, '')
+      const resName = compCol >= 0 ? row[compCol] : ''
+      const chainId = authAsymCol >= 0 ? row[authAsymCol] : (asymCol >= 0 ? row[asymCol] : 'A')
+      const resSeqStr = authSeqCol >= 0 ? row[authSeqCol] : (seqCol >= 0 ? row[seqCol] : '0')
+      const resSeq = parseInt(resSeqStr, 10) || 0
+      const x = parseFloat(xCol >= 0 ? row[xCol] : '0')
+      const y = parseFloat(yCol >= 0 ? row[yCol] : '0')
+      const z = parseFloat(zCol >= 0 ? row[zCol] : '0')
+      const occ = occCol >= 0 ? parseFloat(row[occCol]) || 1.0 : 1.0
+      const bfactor = bfacCol >= 0 ? parseFloat(row[bfacCol]) || 0 : 0
+      atoms.push({
+        serial: atoms.length + 1,
+        name, element, resName, chainId, resSeq, hetero,
+        x, y, z, bfactor, occupancy: occ,
+      })
+    }
+  }
+
+  let cur: PdbResidue | null = null
+  for (let i = 0; i < atoms.length; i++) {
+    const a = atoms[i]
+    if (!cur || cur.chainId !== a.chainId || cur.resSeq !== a.resSeq || cur.resName !== a.resName || cur.hetero !== a.hetero) {
+      if (cur) cur.end = i
+      const ss = ssRecords.get(`${a.chainId}:${a.resSeq}`) ?? 'L'
+      cur = { chainId: a.chainId, resSeq: a.resSeq, resName: a.resName, hetero: a.hetero, start: i, end: i, ss }
+      residues.push(cur)
+    }
+  }
+  if (cur) cur.end = atoms.length
+  const chains: PdbChain[] = []
+  let curChain: PdbChain | null = null
+  for (let i = 0; i < residues.length; i++) {
+    const r = residues[i]
+    const polymer = !r.hetero && (isProtein(r.resName) || isNucleic(r.resName))
+    const sameKind = curChain && curChain.id === r.chainId && !!curChain.polymer === polymer
+    if (!curChain || !sameKind) {
+      curChain = { id: r.chainId, polymer, residueIdx: [] }
+      chains.push(curChain)
+    }
+    curChain.residueIdx.push(i)
+  }
+  return { atoms, residues, chains, title, ssFromRecords: ssRecords.size > 0 }
+}
+
+/** Extract a CIF `loop_` block by its column prefix (e.g. `_atom_site.`). */
+function extractCifLoop(text: string, prefix: string): { headers: string[]; rows: string[][] } | null {
+  const lines = text.split(/\r?\n/)
+  let i = 0
+  while (i < lines.length) {
+    if (lines[i].trim() === 'loop_') {
+      const headers: string[] = []
+      let j = i + 1
+      while (j < lines.length && lines[j].trim().startsWith(prefix)) {
+        headers.push(lines[j].trim())
+        j++
+      }
+      if (headers.length > 0) {
+        const rows: string[][] = []
+        while (j < lines.length) {
+          const ln = lines[j].trim()
+          if (ln === '' || ln === 'loop_' || ln.startsWith('_') || ln.startsWith('data_')) break
+          const row = parseCifRow(ln, lines, j)
+          if (row.row) rows.push(row.row)
+          j = row.nextLine
+        }
+        return { headers, rows }
+      }
+    }
+    i++
+  }
+  return null
+}
+
+/** Parse a single CIF data row (handling quoted strings + semicolon blocks). */
+function parseCifRow(line: string, lines: string[], idx: number): { row: string[] | null; nextLine: number } {
+  const tokens: string[] = []
+  let i = 0
+  let cur = ''
+  let inSingle = false
+  let inDouble = false
+  if (line.startsWith(';')) {
+    let ml = line.substring(1)
+    let k = idx + 1
+    while (k < lines.length) {
+      const ln = lines[k]
+      if (ln.trim() === ';') {
+        tokens.push(ml.trim())
+        return { row: tokens, nextLine: k + 1 }
+      }
+      ml += '\n' + ln
+      k++
+    }
+    return { row: null, nextLine: k }
+  }
+  while (i < line.length) {
+    const c = line[i]
+    if (inSingle) {
+      if (c === "'") { inSingle = false; tokens.push(cur); cur = '' } else { cur += c }
+    } else if (inDouble) {
+      if (c === '"') { inDouble = false; tokens.push(cur); cur = '' } else { cur += c }
+    } else {
+      if (c === "'") { inSingle = true }
+      else if (c === '"') { inDouble = true }
+      else if (c === ' ' || c === '\t') {
+        if (cur) { tokens.push(cur); cur = '' }
+      } else { cur += c }
+    }
+    i++
+  }
+  if (cur) tokens.push(cur)
+  return { row: tokens, nextLine: idx + 1 }
+}
+
+/** Parse the _struct_conf table for helix/sheet assignments. */
+function parseCifStructConf(text: string, ssRecords: Map<string, 'H' | 'E'>) {
+  const loop = extractCifLoop(text, '_struct_conf.')
+  if (!loop) return
+  const { headers, rows } = loop
+  const colIdx: Record<string, number> = {}
+  headers.forEach((h, i) => { colIdx[h] = i })
+  const typeCol = colIdx['_struct_conf.conf_type_id'] ?? -1
+  const begLabelAsymCol = colIdx['_struct_conf.beg_label_asym_id'] ?? -1
+  const begAuthAsymCol = colIdx['_struct_conf.beg_auth_asym_id'] ?? -1
+  const begSeqCol = colIdx['_struct_conf.beg_label_seq_id'] ?? -1
+  const begAuthSeqCol = colIdx['_struct_conf.beg_auth_seq_id'] ?? -1
+  const endAuthSeqCol = colIdx['_struct_conf.end_auth_seq_id'] ?? -1
+  for (const row of rows) {
+    const confType = typeCol >= 0 ? row[typeCol] : ''
+    let ss: 'H' | 'E' | null = null
+    if (confType.startsWith('HELX')) ss = 'H'
+    else if (confType === 'STRN') ss = 'E'
+    if (!ss) continue
+    const chainId = begAuthAsymCol >= 0 ? row[begAuthAsymCol] : (begLabelAsymCol >= 0 ? row[begLabelAsymCol] : 'A')
+    const startSeqStr = begAuthSeqCol >= 0 ? row[begAuthSeqCol] : (begSeqCol >= 0 ? row[begSeqCol] : '0')
+    const endSeqStr = endAuthSeqCol >= 0 ? row[endAuthSeqCol] : startSeqStr
+    const startSeq = parseInt(startSeqStr, 10)
+    const endSeq = parseInt(endSeqStr, 10)
+    if (!isNaN(startSeq) && !isNaN(endSeq)) {
+      for (let s = startSeq; s <= endSeq; s++) {
+        ssRecords.set(`${chainId}:${s}`, ss)
+      }
+    }
+  }
+}
+
+/** Auto-detect format and parse. */
+export function parseStructure(text: string, filename?: string): PdbStructure {
+  const ext = (filename ?? '').toLowerCase().split('.').pop() ?? ''
+  const sniff = text.trimStart().slice(0, 100)
+  if (ext === 'cif' || sniff.startsWith('data_')) {
+    return parseCIF(text)
+  }
+  return parsePDB(text)
+}
+
+/** Center a structure on a given point (e.g. the pore centre cpoint).
+ *  Returns a NEW PdbStructure (atoms copied) so the original is not mutated. */
+export function centerStructure(structure: PdbStructure, centre: [number, number, number]): PdbStructure {
+  const [cx, cy, cz] = centre
+  const atoms = structure.atoms.map(a => ({
+    ...a,
+    x: a.x - cx,
+    y: a.y - cy,
+    z: a.z - cz,
+  }))
+  return { ...structure, atoms }
+}
+
+/** Compute the geometric centre (centroid) of all heavy (non-H) atoms. */
+export function geometricCentre(structure: PdbStructure): [number, number, number] {
+  let cx = 0, cy = 0, cz = 0, n = 0
+  for (const a of structure.atoms) {
+    if (a.element === 'H') continue
+    cx += a.x; cy += a.y; cz += a.z; n++
+  }
+  if (n === 0) return [0, 0, 0]
+  return [cx / n, cy / n, cz / n]
 }

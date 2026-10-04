@@ -16,8 +16,16 @@ function apiUrl(path: string) {
 }
 
 export interface RadSetInfo {
-  rad_sets: string[]
+  rad_sets: { name: string; description: string }[]
   default: string
+}
+
+export interface PdbFetchResult {
+  pdb_id: string
+  format: 'pdb' | 'cif'
+  filename: string
+  content: string
+  size: number
 }
 
 export interface ExampleInfo {
@@ -53,9 +61,34 @@ export function examplePdbUrl(exampleId: string, pdbName: string): string {
   return apiUrl(`/api/example/${encodeURIComponent(exampleId)}/${encodeURIComponent(pdbName)}`)
 }
 
+/** Fetch a structure from RCSB by its 4-character PDB ID (e.g. "1grm").
+ *  Returns the raw PDB or mmCIF text.  Proxied through the Python service
+ *  to avoid CORS restrictions in the browser. */
+export async function fetchPdbId(pdbId: string): Promise<PdbFetchResult> {
+  const pid = pdbId.trim().toLowerCase()
+  if (!/^[a-z0-9]{4}$/.test(pid)) {
+    throw new Error('PDB ID must be exactly 4 alphanumeric characters (e.g. 1grm)')
+  }
+  const r = await fetch(apiUrl(`/api/pdb/${encodeURIComponent(pid)}`))
+  if (!r.ok) {
+    let msg = `RCSB fetch failed: HTTP ${r.status}`
+    try {
+      const d = await r.json()
+      if (d?.detail) msg = typeof d.detail === 'string' ? d.detail : JSON.stringify(d.detail)
+    } catch { /* ignore */ }
+    throw new Error(msg)
+  }
+  return r.json()
+}
+
 /** Build the URL for downloading a raw output file. */
 export function downloadUrl(jobId: string, filename: string): string {
   return apiUrl(`/api/download/${encodeURIComponent(jobId)}/${encodeURIComponent(filename)}`)
+}
+
+/** Build the URL for downloading all output files as a ZIP archive. */
+export function downloadZipUrl(jobId: string): string {
+  return apiUrl(`/api/job/${encodeURIComponent(jobId)}/zip`)
 }
 
 export interface JobFile { name: string; size: number }

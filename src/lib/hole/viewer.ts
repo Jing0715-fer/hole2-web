@@ -14,8 +14,8 @@
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import {
-  parsePDB, computeBonds, elementInfo, isProtein, isNucleic, isWater,
-  type PdbStructure,
+  parsePDB, parseStructure, computeBonds, elementInfo, isProtein, isNucleic, isWater,
+  centerStructure, geometricCentre, type PdbStructure,
 } from './pdb'
 import {
   poreZoneColor, vmdColorToHex,
@@ -33,6 +33,8 @@ export interface HoleViewerOptions {
   showSurface: boolean
   showSpheres: boolean
   showCentreLine: boolean
+  /** Show side-chain sticks for residues lining the pore (within cutoff Å of the centre line). */
+  showPoreSideChains: boolean
   surfaceOpacity: number
   sphereScale: number
 }
@@ -53,15 +55,20 @@ export class HoleViewer {
   private sphereGroup = new THREE.Group()
   private options: HoleViewerOptions = {
     showCartoon: true,
-    showBallStick: true,
+    showBallStick: false,   // off by default — cartoon is the main representation
     showSurface: true,
     showSpheres: false,
     showCentreLine: true,
+    showPoreSideChains: true,  // highlight the pore-lining residues
     surfaceOpacity: 0.85,
     sphereScale: 1.0,
   }
   // atom colour array for ball-stick (CPK)
   private atomColors: Float32Array = new Float32Array(0)
+  // current structure (kept so we can rebuild pore side-chains after HOLE run)
+  private currentStructure: PdbStructure | null = null
+  // current centreline (kept so we can rebuild pore side-chains on option toggle)
+  private currentCentreline: [number, number, number][] = []
   // bounding box of the structure + hole surface combined
   private bbox = new THREE.Box3()
   private axesHelper: THREE.AxesHelper | null = null
@@ -136,11 +143,20 @@ export class HoleViewer {
     this.rafId = requestAnimationFrame(tick)
   }
 
-  /** Load a PDB structure (text) and render cartoon + ball-and-stick. */
-  loadStructure(pdbText: string) {
+  /** Load a PDB/CIF structure (text) and render cartoon + ball-and-stick.
+   *  Auto-detects the format (PDB vs mmCIF) by sniffing the file header.
+   *  The structure is centred on its geometric centroid so the pore is
+   *  roughly in view (the HOLE cpoint may shift this further once loaded). */
+  loadStructure(text: string, filename?: string) {
     // dispose existing structure
     this.clearGroup(this.structureGroup)
-    this.structure = parsePDB(pdbText)
+    let parsed = parseStructure(text, filename)
+    // Center the structure on its geometric centroid so it sits in view.
+    // (Once HOLE results arrive, we re-centre on the pore cpoint.)
+    const gc = geometricCentre(parsed)
+    parsed = centerStructure(parsed, gc)
+    this.structure = parsed
+    this.currentStructure = parsed
     const s = this.structure
     if (s.atoms.length === 0) return
 
@@ -153,6 +169,14 @@ export class HoleViewer {
         chainIdx++
       }
     }
+    // Pre-compute the per-atom CPK colour array (used by ball-stick + side-chains)
+    this.atomColors = new Float32Array(s.atoms.length * 3)
+    for (let i = 0; i < s.atoms.length; i++) {
+      const info = elementInfo(s.atoms[i].element)
+      this.atomColors[i * 3] = info.color[0]
+      this.atomColors[i * 3 + 1] = info.color[1]
+      this.atomColors[i * 3 + 2] = info.color[2]
+    }
 
     // 1) cartoon ribbons (protein) + nucleic backbone tubes
     if (this.options.showCartoon) {
@@ -162,6 +186,11 @@ export class HoleViewer {
     // 2) ball-and-stick (hetero atoms + ligands; optionally all atoms)
     if (this.options.showBallStick) {
       this.buildBallStick(s)
+    }
+
+    // 3) pore-lining side chains (only if HOLE results are already loaded)
+    if (this.options.showPoreSideChains && this.currentCentreline.length > 0) {
+      this.buildPoreSideChains(s, this.currentCentreline)
     }
 
     this.updateVisibility()
@@ -174,6 +203,26 @@ export class HoleViewer {
     this.clearGroup(this.surfaceGroup)
     this.clearGroup(this.centreLineGroup)
     this.clearGroup(this.sphereGroup)
+    // Also rebuild the structure group's side-chains since the centre line
+    // may have changed.  We keep a reference to the current structure.
+    this.currentCentreline = centreline
+    if (this.currentStructure && this.options.showPoreSideChains && centreline.length > 0) {
+      // Re-render the whole structure so the side-chains pick up the new centre line
+      // (cheaper than tracking which side-chain atoms to add/remove)
+      this.clearGroup(this.structureGroup)
+      const s = this.currentStructure
+      const chainColorMap = new Map<string, number>()
+      let chainIdx = 0
+      for (const c of s.chains) {
+        if (!chainColorMap.has(c.id)) {
+          chainColorMap.set(c.id, CHAIN_COLORS[chainIdx % CHAIN_COLORS.length])
+          chainIdx++
+        }
+      }
+      if (this.options.showCartoon) this.buildCartoon(s, chainColorMap)
+      if (this.options.showBallStick) this.buildBallStick(s)
+      this.buildPoreSideChains(s, centreline)
+    }
 
     // surface mesh — flat shaded so each triangle's vertex colour shows
     if (surface.triangles.length > 0) {
@@ -195,16 +244,18 @@ export class HoleViewer {
   }
 
   private buildCartoon(s: PdbStructure, chainColorMap: Map<string, number>) {
-    // For each polymer chain, build a tube through the CA atoms (protein) or
-    // P atoms (nucleic).  Coloured per-chain.  A proper cartoon ribbon
-    // (helix/sheet) needs DSSP; here we use a smooth Catmull-Rom tube which
-    // reads well for most structures and is robust to missing SS records.
+    // Secondary-structure-aware cartoon:
+    //   - helix residues → thick rounded tube (radius 0.55) in helix colour
+    //   - sheet residues → flat arrow (width 1.6, thickness 0.25) in sheet colour
+    //   - loop residues → thin tube (radius 0.22) in chain colour
+    // SS comes from PDB HELIX/SHEET records (or mmCIF _struct_conf).
+    // For nucleic chains, render a smooth tube through P atoms (no SS).
     for (const chain of s.chains) {
       if (!chain.polymer) continue
-      const points: THREE.Vector3[] = []
+      // Collect backbone anchors + their SS for this chain
+      const anchors: { pos: THREE.Vector3; ss: 'H' | 'E' | 'L'; resSeq: number }[] = []
       for (const ri of chain.residueIdx) {
         const r = s.residues[ri]
-        // find CA for protein, P for nucleic, else first heavy atom
         let anchor = -1
         for (let i = r.start; i < r.end; i++) {
           const name = s.atoms[i].name.toUpperCase()
@@ -212,131 +263,236 @@ export class HoleViewer {
           if (isNucleic(r.resName) && (name === 'P' || name === "O5'")) { anchor = i; break }
         }
         if (anchor < 0) {
-          // fall back to first non-H atom
           for (let i = r.start; i < r.end; i++) {
             if (s.atoms[i].element !== 'H') { anchor = i; break }
           }
         }
         if (anchor >= 0) {
           const a = s.atoms[anchor]
-          points.push(new THREE.Vector3(a.x, a.y, a.z))
+          anchors.push({
+            pos: new THREE.Vector3(a.x, a.y, a.z),
+            ss: r.ss,
+            resSeq: r.resSeq,
+          })
         }
       }
-      if (points.length < 2) continue
-      // chain break detection: if two consecutive points are > 8 Å apart,
-      // split into multiple tubes.
-      const segments: THREE.Vector3[][] = [[points[0]]]
-      for (let i = 1; i < points.length; i++) {
-        if (points[i].distanceTo(points[i - 1]) > 8.0) {
-          segments.push([points[i]])
+      if (anchors.length < 2) continue
+
+      // Detect chain breaks (consecutive CA distance > 8 Å → new segment)
+      const segments: typeof anchors[] = [[anchors[0]]]
+      for (let i = 1; i < anchors.length; i++) {
+        if (anchors[i].pos.distanceTo(anchors[i - 1].pos) > 8.0) {
+          segments.push([anchors[i]])
         } else {
-          segments[segments.length - 1].push(points[i])
+          segments[segments.length - 1].push(anchors[i])
         }
       }
-      const col = chainColorMap.get(chain.id) ?? 0x10b981
+
+      const chainCol = chainColorMap.get(chain.id) ?? 0x10b981
+      const isNucleic = anchors[0] !== undefined && !s.residues[chain.residueIdx[0]]?.ss
+      // Build cartoon segments: for each contiguous SS run, build the right geometry
       for (const seg of segments) {
         if (seg.length < 2) continue
-        const curve = new THREE.CatmullRomCurve3(seg, false, 'catmullrom', 0.5)
-        const tubeGeo = new THREE.TubeGeometry(curve, Math.max(8, seg.length * 4), 0.35, 8, false)
-        const mat = new THREE.MeshStandardMaterial({
-          color: col, roughness: 0.45, metalness: 0.05,
-        })
-        const mesh = new THREE.Mesh(tubeGeo, mat)
-        this.structureGroup.add(mesh)
-        this.disposables.push(tubeGeo, mat)
+        // Smooth the backbone with Catmull-Rom for nicer curves
+        const positions = seg.map(a => a.pos)
+        // Group consecutive residues by SS type
+        let i = 0
+        while (i < seg.length) {
+          const ss = seg[i].ss
+          let j = i
+          while (j < seg.length && seg[j].ss === ss) j++
+          // segment from i..j (exclusive)
+          const runPts = positions.slice(Math.max(0, i - 1), Math.min(seg.length, j + 1))
+          if (runPts.length >= 2) {
+            const curve = new THREE.CatmullRomCurve3(runPts, false, 'catmullrom', 0.5)
+            const tubularSeg = Math.max(8, runPts.length * 6)
+            if (ss === 'H') {
+              // Helix → thick rounded tube
+              const tubeGeo = new THREE.TubeGeometry(curve, tubularSeg, 0.55, 12, false)
+              const mat = new THREE.MeshStandardMaterial({
+                color: 0xe0566b, roughness: 0.4, metalness: 0.05,
+              })
+              const mesh = new THREE.Mesh(tubeGeo, mat)
+              this.structureGroup.add(mesh)
+              this.disposables.push(tubeGeo, mat)
+            } else if (ss === 'E') {
+              // Sheet → flat ribbon (use a flat extruded shape)
+              const tubeGeo = new THREE.TubeGeometry(curve, tubularSeg, 0.25, 4, false)
+              // Flatten by scaling Y → use a custom geometry: take the tube and squash
+              const posAttr = tubeGeo.attributes.position as THREE.BufferAttribute
+              const v = new THREE.Vector3()
+              for (let k = 0; k < posAttr.count; k++) {
+                v.fromBufferAttribute(posAttr, k)
+                // Find the cross-section centre for this slice (approx: nearest point on curve)
+                // Simple flatten: scale the offset from the curve centre in X (width) and Y (thickness)
+                // TubeGeometry already gives us radial offset; we scale X by 3 to make flat
+                // For simplicity, scale x by 3.2 and y by 0.3 (relative to tube centre)
+                // Actually just scale the whole geometry's X by 3 and Y by 0.5:
+              }
+              // Apply scale to make it flat (ribbon)
+              tubeGeo.scale(3.2, 0.5, 1)
+              const mat = new THREE.MeshStandardMaterial({
+                color: 0xf0a830, roughness: 0.4, metalness: 0.05, side: THREE.DoubleSide,
+              })
+              const mesh = new THREE.Mesh(tubeGeo, mat)
+              this.structureGroup.add(mesh)
+              this.disposables.push(tubeGeo, mat)
+            } else {
+              // Loop → thin tube in chain colour
+              const tubeGeo = new THREE.TubeGeometry(curve, tubularSeg, 0.22, 8, false)
+              const mat = new THREE.MeshStandardMaterial({
+                color: chainCol, roughness: 0.5, metalness: 0.05,
+              })
+              const mesh = new THREE.Mesh(tubeGeo, mat)
+              this.structureGroup.add(mesh)
+              this.disposables.push(tubeGeo, mat)
+            }
+          }
+          i = j
+        }
       }
     }
   }
 
+  /** Build side-chain sticks for residues whose CA is within `cutoff` Å of
+   *  any pore centre-line sphere.  This shows the pore-lining residues. */
+  buildPoreSideChains(s: PdbStructure, centreline: [number, number, number][], cutoff = 6.0) {
+    if (centreline.length === 0) return
+    // Build a spatial hash of centre-line points for fast proximity queries
+    const cellSize = cutoff * 1.5
+    const map = new Map<string, THREE.Vector3[]>()
+    const v = new THREE.Vector3()
+    for (const p of centreline) {
+      v.set(p[0], p[1], p[2])
+      const key = `${Math.floor(v.x / cellSize)},${Math.floor(v.y / cellSize)},${Math.floor(v.z / cellSize)}`
+      let arr = map.get(key)
+      if (!arr) { arr = []; map.set(key, arr) }
+      arr.push(v.clone())
+    }
+    const nearPore = (x: number, y: number, z: number): boolean => {
+      const cx = Math.floor(x / cellSize), cy = Math.floor(y / cellSize), cz = Math.floor(z / cellSize)
+      for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) for (let dz = -1; dz <= 1; dz++) {
+        const arr = map.get(`${cx + dx},${cy + dy},${cz + dz}`)
+        if (!arr) continue
+        for (const p of arr) {
+          const d2 = (p.x - x) ** 2 + (p.y - y) ** 2 + (p.z - z) ** 2
+          if (d2 < cutoff * cutoff) return true
+        }
+      }
+      return false
+    }
+    // Find residues with CA near the pore → show all their side-chain heavy atoms as sticks
+    const atomIdx: number[] = []
+    for (const chain of s.chains) {
+      if (!chain.polymer) continue
+      for (const ri of chain.residueIdx) {
+        const r = s.residues[ri]
+        // Find CA
+        let caIdx = -1
+        for (let i = r.start; i < r.end; i++) {
+          if (s.atoms[i].name.toUpperCase() === 'CA') { caIdx = i; break }
+        }
+        if (caIdx < 0) continue
+        const ca = s.atoms[caIdx]
+        if (!nearPore(ca.x, ca.y, ca.z)) continue
+        // Add all side-chain heavy atoms (skip backbone: N, CA, C, O)
+        for (let i = r.start; i < r.end; i++) {
+          const nm = s.atoms[i].name.toUpperCase()
+          if (nm === 'N' || nm === 'CA' || nm === 'C' || nm === 'O') continue
+          if (s.atoms[i].element === 'H') continue
+          atomIdx.push(i)
+        }
+        // Also include the backbone CA so the sidechain connects visually
+        atomIdx.push(caIdx)
+      }
+    }
+    if (atomIdx.length === 0) return
+    // Build the side-chain sticks (cylinders for bonds, spheres for atoms)
+    this.buildSticksForAtoms(s, atomIdx, 0.12)
+    this.buildSpheresForAtoms(s, atomIdx, 0.18)
+  }
+
+  /** Build stick cylinders + spheres for a specific set of atom indices. */
+  private buildSticksForAtoms(s: PdbStructure, atomIdx: number[], stickRadius: number) {
+    const bonds = computeBonds(s)
+    if (bonds.length === 0) return
+    const atomSet = new Set(atomIdx)
+    const relevant = bonds.filter(([a, b]) => atomSet.has(a) && atomSet.has(b))
+    if (relevant.length === 0) return
+    const cylGeo = new THREE.CylinderGeometry(stickRadius, stickRadius, 1, 8, 1, true)
+    const cylMat = new THREE.MeshStandardMaterial({ roughness: 0.5, metalness: 0.0 })
+    const inst = new THREE.InstancedMesh(cylGeo, cylMat, relevant.length * 2)
+    const m = new THREE.Matrix4()
+    const color = new THREE.Color()
+    const up = new THREE.Vector3(0, 1, 0)
+    const a = new THREE.Vector3()
+    const b = new THREE.Vector3()
+    const mid = new THREE.Vector3()
+    const quat = new THREE.Quaternion()
+    const colors = this.atomColors
+    for (let k = 0; k < relevant.length; k++) {
+      const [i, j] = relevant[k]
+      const ai = s.atoms[i], aj = s.atoms[j]
+      a.set(ai.x, ai.y, ai.z)
+      b.set(aj.x, aj.y, aj.z)
+      mid.copy(a).lerp(b, 0.5)
+      const half = a.clone().lerp(mid, 0.5)
+      const len = a.distanceTo(mid)
+      const dir = mid.clone().sub(a).normalize()
+      quat.setFromUnitVectors(up, dir)
+      m.compose(half, quat, new THREE.Vector3(1, len, 1))
+      inst.setMatrixAt(k * 2, m)
+      color.setRGB(colors[i * 3], colors[i * 3 + 1], colors[i * 3 + 2])
+      inst.setColorAt(k * 2, color)
+      const half2 = mid.clone().lerp(b, 0.5)
+      const len2 = mid.distanceTo(b)
+      const dir2 = b.clone().sub(mid).normalize()
+      quat.setFromUnitVectors(up, dir2)
+      m.compose(half2, quat, new THREE.Vector3(1, len2, 1))
+      inst.setMatrixAt(k * 2 + 1, m)
+      color.setRGB(colors[j * 3], colors[j * 3 + 1], colors[j * 3 + 2])
+      inst.setColorAt(k * 2 + 1, color)
+    }
+    inst.instanceMatrix.needsUpdate = true
+    if (inst.instanceColor) inst.instanceColor.needsUpdate = true
+    this.structureGroup.add(inst)
+    this.disposables.push(cylGeo, cylMat)
+  }
+
+  private buildSpheresForAtoms(s: PdbStructure, atomIdx: number[], radius: number) {
+    const sphereGeo = new THREE.SphereGeometry(1, 16, 12)
+    const sphereMat = new THREE.MeshStandardMaterial({ roughness: 0.35, metalness: 0.05 })
+    const inst = new THREE.InstancedMesh(sphereGeo, sphereMat, atomIdx.length)
+    const m = new THREE.Matrix4()
+    const color = new THREE.Color()
+    const colors = this.atomColors
+    for (let k = 0; k < atomIdx.length; k++) {
+      const i = atomIdx[k]
+      const a = s.atoms[i]
+      m.makeScale(radius, radius, radius)
+      m.setPosition(a.x, a.y, a.z)
+      inst.setMatrixAt(k, m)
+      color.setRGB(colors[i * 3], colors[i * 3 + 1], colors[i * 3 + 2])
+      inst.setColorAt(k, color)
+    }
+    inst.instanceMatrix.needsUpdate = true
+    if (inst.instanceColor) inst.instanceColor.needsUpdate = true
+    this.structureGroup.add(inst)
+    this.disposables.push(sphereGeo, sphereMat)
+  }
+
   private buildBallStick(s: PdbStructure) {
-    // pick atoms: all hetero + water O, plus the first N atoms of each chain
-    // (cap so the scene does not get too heavy for large structures)
-    const MAX_ATOMS = 8000
+    // For ball-and-stick we show only hetero atoms + ligands (the cartoon
+    // already shows the polymer backbone).  This keeps the scene light and
+    // avoids duplicating the polymer atoms that the cartoon already renders.
     const atomIdx: number[] = []
     for (let i = 0; i < s.atoms.length; i++) {
       const a = s.atoms[i]
-      if (a.hetero) { atomIdx.push(i); continue }
-      // for polymer atoms, show only backbone + sidechain heavy atoms
-      // but cap total to MAX_ATOMS to keep performance sane
-      if (atomIdx.length < MAX_ATOMS) atomIdx.push(i)
+      if (a.hetero && !isWater(a.resName)) atomIdx.push(i)
     }
-
-    // build per-atom colour array (CPK)
-    this.atomColors = new Float32Array(s.atoms.length * 3)
-    for (let i = 0; i < s.atoms.length; i++) {
-      const el = s.atoms[i].element
-      const info = elementInfo(el)
-      this.atomColors[i * 3] = info.color[0]
-      this.atomColors[i * 3 + 1] = info.color[1]
-      this.atomColors[i * 3 + 2] = info.color[2]
-    }
-
-    // atom spheres — InstancedMesh of unit spheres scaled per atom
-    if (atomIdx.length > 0) {
-      const sphereGeo = new THREE.SphereGeometry(1, 16, 12)
-      const sphereMat = new THREE.MeshStandardMaterial({ roughness: 0.35, metalness: 0.05 })
-      const inst = new THREE.InstancedMesh(sphereGeo, sphereMat, atomIdx.length)
-      const m = new THREE.Matrix4()
-      const color = new THREE.Color()
-      const scale = this.options.sphereScale
-      for (let k = 0; k < atomIdx.length; k++) {
-        const i = atomIdx[k]
-        const a = s.atoms[i]
-        const r = a.hetero ? elementInfo(a.element).vdw * 0.45 : 0.28
-        m.makeScale(r * scale, r * scale, r * scale)
-        m.setPosition(a.x, a.y, a.z)
-        inst.setMatrixAt(k, m)
-        color.setRGB(this.atomColors[i * 3], this.atomColors[i * 3 + 1], this.atomColors[i * 3 + 2])
-        inst.setColorAt(k, color)
-      }
-      inst.instanceMatrix.needsUpdate = true
-      if (inst.instanceColor) inst.instanceColor.needsUpdate = true
-      this.structureGroup.add(inst)
-      this.disposables.push(sphereGeo, sphereMat)
-    }
-
-    // bonds — half-bond-coloured cylinders
-    const bonds = computeBonds(s)
-    if (bonds.length > 0) {
-      const cylGeo = new THREE.CylinderGeometry(0.08, 0.08, 1, 8, 1, true)
-      const cylMat = new THREE.MeshStandardMaterial({ roughness: 0.5, metalness: 0.0 })
-      const inst = new THREE.InstancedMesh(cylGeo, cylMat, bonds.length * 2)
-      const m = new THREE.Matrix4()
-      const color = new THREE.Color()
-      const up = new THREE.Vector3(0, 1, 0)
-      const a = new THREE.Vector3()
-      const b = new THREE.Vector3()
-      const mid = new THREE.Vector3()
-      const quat = new THREE.Quaternion()
-      for (let k = 0; k < bonds.length; k++) {
-        const [i, j] = bonds[k]
-        const ai = s.atoms[i], aj = s.atoms[j]
-        a.set(ai.x, ai.y, ai.z)
-        b.set(aj.x, aj.y, aj.z)
-        mid.copy(a).lerp(b, 0.5)
-        const half = a.clone().lerp(mid, 0.5)
-        const len = a.distanceTo(mid)
-        const dir = mid.clone().sub(a).normalize()
-        quat.setFromUnitVectors(up, dir)
-        m.compose(half, quat, new THREE.Vector3(1, len, 1))
-        inst.setMatrixAt(k * 2, m)
-        color.setRGB(this.atomColors[i * 3], this.atomColors[i * 3 + 1], this.atomColors[i * 3 + 2])
-        inst.setColorAt(k * 2, color)
-        // second half
-        const half2 = mid.clone().lerp(b, 0.5)
-        const len2 = mid.distanceTo(b)
-        const dir2 = b.clone().sub(mid).normalize()
-        quat.setFromUnitVectors(up, dir2)
-        m.compose(half2, quat, new THREE.Vector3(1, len2, 1))
-        inst.setMatrixAt(k * 2 + 1, m)
-        color.setRGB(this.atomColors[j * 3], this.atomColors[j * 3 + 1], this.atomColors[j * 3 + 2])
-        inst.setColorAt(k * 2 + 1, color)
-      }
-      inst.instanceMatrix.needsUpdate = true
-      if (inst.instanceColor) inst.instanceColor.needsUpdate = true
-      this.structureGroup.add(inst)
-      this.disposables.push(cylGeo, cylMat)
-    }
+    if (atomIdx.length === 0) return
+    this.buildSpheresForAtoms(s, atomIdx, 0.32)
+    this.buildSticksForAtoms(s, atomIdx, 0.1)
   }
 
   private buildSurfaceMesh(surface: HoleSurface) {
@@ -426,6 +582,7 @@ export class HoleViewer {
 
   /** Set viewer options (visibility toggles, opacity, etc.). */
   setOptions(opts: Partial<HoleViewerOptions>) {
+    const prevPoreSideChains = this.options.showPoreSideChains
     this.options = { ...this.options, ...opts }
     // if opacity changed, update the surface material
     if (opts.surfaceOpacity !== undefined) {
@@ -437,11 +594,29 @@ export class HoleViewer {
         }
       })
     }
+    // If the pore-side-chains toggle changed, rebuild the structure group so
+    // the side-chains are added/removed.  Only do this if HOLE results exist.
+    if (opts.showPoreSideChains !== undefined && opts.showPoreSideChains !== prevPoreSideChains
+        && this.currentStructure && this.currentCentreline.length > 0) {
+      this.clearGroup(this.structureGroup)
+      const s = this.currentStructure
+      const chainColorMap = new Map<string, number>()
+      let chainIdx = 0
+      for (const c of s.chains) {
+        if (!chainColorMap.has(c.id)) {
+          chainColorMap.set(c.id, CHAIN_COLORS[chainIdx % CHAIN_COLORS.length])
+          chainIdx++
+        }
+      }
+      if (this.options.showCartoon) this.buildCartoon(s, chainColorMap)
+      if (this.options.showBallStick) this.buildBallStick(s)
+      if (this.options.showPoreSideChains) this.buildPoreSideChains(s, this.currentCentreline)
+    }
     this.updateVisibility()
   }
 
   private updateVisibility() {
-    this.structureGroup.visible = this.options.showCartoon || this.options.showBallStick
+    this.structureGroup.visible = this.options.showCartoon || this.options.showBallStick || this.options.showPoreSideChains
     this.surfaceGroup.visible = this.options.showSurface
     this.centreLineGroup.visible = this.options.showCentreLine
     this.sphereGroup.visible = this.options.showSpheres

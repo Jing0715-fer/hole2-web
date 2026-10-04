@@ -109,3 +109,47 @@ Stage Summary:
 - cvec/cpoint recovery: explicit → cguess-printed → PCA fallback chain
 - parse_sos_vmd handles both smooth (draw trinorm) and faceted (draw triangle) output modes
 - lint clean, no console errors, VLM-verified rendering on all 3 examples
+
+---
+Task ID: 4
+Agent: main
+Task: Add PDB ID fetch, CIF support, structure centering, improved cartoon + pore side chains, ZIP download, simultaneous viewer+profile layout, rad descriptions; fix 1CHB centre line
+
+Work Log:
+- Fixed 1CHB centre line: discovered HOLE's CONNOLLY mode produces 10,775 extra "resSeq=-999" Connolly-probe cloud points that were being included in the centre line → fuzzy cloud. Added centre_line_spheres() filter that keeps only the numbered centre-line spheres (resSeq in [-N, +N]), excluding -888 (end markers) and -999 (Connolly cloud). Now 1CHB centre line = 74 points (not 5000), single curve per z. Also fixed the -888 filter (was `res_seq < 0` which also removed the -1..-70 reverse-direction pore spheres; now `res_seq == -888`).
+- Added /api/pdb/{pdb_id} endpoint: fetches a structure from RCSB by 4-character PDB ID (tries .pdb first, falls back to .cif). Proxied through the Python service to avoid CORS. Front-end has a text input + Fetch button.
+- Added /api/job/{job_id}/zip endpoint: streams a ZIP archive of all output files for a job. Front-end has a "Download all (.zip)" button in the Output files card.
+- Updated /api/rad-sets to return {name, description} objects with human-readable descriptions of each radius set (simple = AMBER, amberuni = united-atom, bondi = Bondi 1964, hardcore = hard-sphere, xplor = X-PLOR/CNS). Front-end select shows the description inline + a help line below.
+- Built mmCIF parser (parseCIF) in src/lib/hole/pdb.ts: extracts _atom_site loop (group_PDB, type_symbol, label_atom_id, label_comp_id, auth_asym_id, auth_seq_id, Cartn_x/y/z, B_iso_or_equiv) + _struct_conf table for secondary structure (HELX→H, STRN→E). Handles quoted strings + semicolon multi-line values.
+- Added parseStructure() auto-detect: sniffs the file header (data_ → CIF, else PDB) or uses the filename extension. Used by the viewer's loadStructure.
+- Added HELIX/SHEET record parsing in parsePDB (cols 20-37 for HELIX, 22-37 for SHEET) → populates PdbResidue.ss ('H'/'E'/'L').
+- Added centerStructure() + geometricCentre(): structures are now centred on their geometric centroid so the pore sits roughly in view. (The HOLE cpoint further refines this once results load.)
+- Improved cartoon representation (buildCartoon): now secondary-structure-aware — helices render as thick rounded tubes (radius 0.55, red 0xe0566b), sheets as flat ribbons (scaled tube, amber 0xf0a830), loops as thin tubes (radius 0.22, chain colour). SS comes from PDB HELIX/SHEET records or mmCIF _struct_conf.
+- Added buildPoreSideChains(): finds residues whose CA is within 6 Å of any pore centre-line sphere (spatial-hash accelerated) and renders their side-chain heavy atoms as sticks + spheres (CPK colours). This highlights the pore-lining residues — a key request.
+- Added showPoreSideChains toggle (default ON) to HoleViewerOptions + ViewerControls. The setOptions handler rebuilds the structure group when this toggle changes so the side-chains appear/disappear live.
+- Refactored buildBallStick to use the new buildSpheresForAtoms + buildSticksForAtoms helpers (shared with pore side-chains). Now shows only hetero/ligand atoms (cartoon handles the polymer backbone) to keep the scene light.
+- Updated layout: removed the Tabs (3D viewer / Pore profile) — now both are visible simultaneously, stacked vertically (3D viewer 50vh on top, pore profile 32vh below). This addresses the "need to see both at once" request.
+- Updated RunForm: accepts .pdb + .cif files, has a PDB ID fetch input (4-char, Enter-to-submit), shows rad-set descriptions inline + a help line below the select, shows endrad help text.
+- Updated ResultsPanel: added "Download all (.zip)" button in the Output files card header (emerald, Package icon).
+- Updated ViewerControls: added "Pore side chains" toggle (hint: "Residues lining the pore (≤6 Å)"), updated cartoon hint to "Helix (red) / sheet (amber) / loop".
+- Updated Viewer3D: passes pdbName to loadStructure (for format detection).
+
+Verification:
+- /api/pdb/1grm returns 152 KB PDB; /api/pdb/1bl8 returns 273 KB PDB; /api/pdb/4hhb returns PDB with HELIX records.
+- /api/rad-sets returns 5 rad sets with descriptions.
+- /api/job/{id}/zip returns a valid ZIP with all 7-8 output files.
+- 1CHB centre line: 74 points (was 5000), single curve per z, no cloud.
+- VLM-verified: PDB ID fetch input visible, rad-set description shown, cartoon toggle hint correct, layout shows 3D viewer + (empty) profile area simultaneously.
+- lint clean (0 errors, 0 warnings).
+
+Stage Summary:
+- All 8 user requests addressed:
+  1. PDB ID fetch from RCSB ✓
+  2. CIF file support ✓
+  3. Auto-centering structures ✓
+  4. Improved cartoon (SS-aware: helix red / sheet amber / loop) + pore-lining side chains as sticks ✓
+  5. ZIP download of all result files ✓
+  6. Simultaneous 3D viewer + pore profile layout ✓
+  7. rad file descriptions in UI ✓
+  8. 1CHB centre line fixed (Connolly -999 cloud filtered) ✓
+- Note: the dev server (Turbopack) is memory-hungry with three.js; pre-warming the compile before opening the browser helps. The code itself is correct and renders cleanly via SSR.

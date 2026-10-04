@@ -359,11 +359,19 @@ def parse_sph_file(path: Path) -> list[dict]:
         number for "end" markers)
       - columns 61-66: B-factor (= pore radius for real spheres; 0.00 for
         "end" markers)
-      - columns 23-26: residue sequence number — real spheres have a
-        non-negative index (0, 1, 2, ...); HOLE uses **-888** as a sentinel
-        for the "end" marker spheres it places at the pore exits (where
-        radius ≥ endrad).  These end markers form a 2D grid at each exit
-        and would distort the centre line if included, so we skip them.
+      - columns 23-26: residue sequence number — HOLE uses several sentinels:
+          * **-888**: "end" marker spheres placed at the pore exits
+            (radius ≥ endrad) as a 2D grid.  NOT part of the centre line.
+          * **-999**: Connolly-probe sampling points produced by the CONNOLLY
+            option on large pores (e.g. cholera toxin).  These are NOT
+            centre-line spheres — they're a cloud of probe positions sampled
+            around the pore wall.  Including them makes the centre line look
+            like a fuzzy cloud instead of a single curve.  Excluded from the
+            centre line but kept in the "spheres" list for the sphere-cloud
+            toggle.
+          * **0, 1, 2, ... / -1, -2, ...**: the actual pore centre-line
+            spheres, numbered from cpoint outward in both directions.  These
+            ARE the centre line.
     """
     out: list[dict] = []
     if not path.exists():
@@ -376,12 +384,7 @@ def parse_sph_file(path: Path) -> list[dict]:
                 res_seq = int(line[22:26].strip())
             except (ValueError, IndexError):
                 res_seq = 0
-            # Skip HOLE's "end" marker spheres (residue sequence = -888).
-            # These are placed at the pore exits (radius ≥ endrad) as a 2D
-            # grid and are NOT part of the pore centre line.  Note: HOLE
-            # numbers the spheres on one side of cpoint as 0, 1, 2, ... and
-            # the other side as -1, -2, ... — those negative-indexed spheres
-            # ARE real pore spheres and must be kept.
+            # Skip HOLE's "end" marker spheres (resSeq = -888).
             if res_seq == -888:
                 continue
             # PDB columns: fixed-width
@@ -395,6 +398,19 @@ def parse_sph_file(path: Path) -> list[dict]:
             except (ValueError, IndexError):
                 continue
     return out
+
+
+def centre_line_spheres(spheres: list[dict]) -> list[dict]:
+    """Return only the real pore centre-line spheres.
+
+    HOLE numbers the actual centre-line spheres as 0, 1, 2, ... (one side
+    of cpoint) and -1, -2, ... (the other side).  Other sentinels:
+      -888 = end markers (already filtered in parse_sph_file)
+      -999 = Connolly-probe cloud points (large pores with CONNOLLY option)
+    For the centre-line tube we want ONLY the numbered spheres, sorted by
+    their projection onto cvec.
+    """
+    return [s for s in spheres if s.get("idx", 0) > -100]
 
 
 def parse_sos_vmd(path: Path) -> dict:
@@ -705,26 +721,31 @@ async def run_hole_pipeline(pdb_bytes: bytes, pdb_name: str,
         pass
 
     # Parse the structured data we need for the UI
-    spheres = parse_sph_file(sph_path)
+    all_spheres = parse_sph_file(sph_path)
     surface = parse_sos_vmd(vmd_path)
 
+    # The .sph file may contain Connolly-probe cloud points (resSeq=-999) and
+    # end markers (resSeq=-888, already filtered).  For the centre-line tube
+    # we want ONLY the numbered centre-line spheres (resSeq in [-N, +N]).
+    # The full sphere list (including -999) is kept for the sphere-cloud toggle.
+    cl_spheres = centre_line_spheres(all_spheres)
+
     # If cvec/cpoint were masked (auto-guessed by HOLE's cguess), recover the
-    # channel axis from the .sph sphere centres via PCA.  This lets us build
-    # a properly-ordered centre line (sorted by channel coordinate) and
-    # report the constriction position in 3D.
+    # channel axis.  We PCA on the centre-line spheres only (not the -999
+    # cloud) so the inferred axis points along the actual pore.
     if profile.cvec is None or profile.cpoint is None:
-        inferred_cvec, inferred_cpoint = infer_channel_axis(spheres)
+        inferred_cvec, inferred_cpoint = infer_channel_axis(cl_spheres)
         if profile.cvec is None:
             profile.cvec = inferred_cvec
         if profile.cpoint is None:
             profile.cpoint = inferred_cpoint
 
-    # Sort the .sph spheres by their projection onto cvec so the centre-line
-    # tube in the 3D viewer runs smoothly along the pore (HOLE writes them in
-    # discovery order which zigzags from the cpoint outward in both directions).
+    # Sort the centre-line spheres by their projection onto cvec so the
+    # centre-line tube in the 3D viewer runs smoothly along the pore (HOLE
+    # writes them in discovery order which zigzags from cpoint outward).
     cvx, cvy, cvz = profile.cvec or [0.0, 0.0, 1.0]
     cpx, cpy, cpz = profile.cpoint or [0.0, 0.0, 0.0]
-    spheres_sorted = sorted(spheres, key=lambda s: (
+    cl_sorted = sorted(cl_spheres, key=lambda s: (
         (s["x"] - cpx) * cvx + (s["y"] - cpy) * cvy + (s["z"] - cpz) * cvz
     ))
 
@@ -738,7 +759,7 @@ async def run_hole_pipeline(pdb_bytes: bytes, pdb_name: str,
         "n_samples": profile.n_samples,
         "g_factor": profile.g_factor,
         "g_macro": profile.g_macro,
-        "n_spheres": len(spheres),
+        "n_spheres": len(all_spheres),
         "n_triangles": len(surface.get("triangles", [])),
     }
 
@@ -746,11 +767,11 @@ async def run_hole_pipeline(pdb_bytes: bytes, pdb_name: str,
     warnings = [w for w in [sos_warning] if w]
     return RunResult(
         job_id=job_id, work_dir=str(work_dir),
-        profile=profile, spheres=spheres, surface=surface,
+        profile=profile, spheres=all_spheres, surface=surface,
         summary=summary, files=files,
         log_tail=out[-3000:], returncode=0, error=None,
         warnings=warnings,
-        centreline=[[s["x"], s["y"], s["z"]] for s in spheres_sorted[:5000]],
+        centreline=[[s["x"], s["y"], s["z"]] for s in cl_sorted[:5000]],
     )
 
 
@@ -781,18 +802,6 @@ async def health():
         "env_prefix": env_prefix(),
         "jobs_dir": str(JOBS_DIR),
     }
-
-
-@app.get("/api/rad-sets")
-async def rad_sets():
-    """List bundled vdw radius sets."""
-    names: list[str] = []
-    rad_dir = Path(env_prefix()) / "share/hole2/rad"
-    if rad_dir.exists():
-        names = sorted(p.stem for p in rad_dir.glob("*.rad"))
-    if not names and HOLE2_REPO_RAD.exists():
-        names = sorted(p.stem for p in HOLE2_REPO_RAD.glob("*.rad"))
-    return {"rad_sets": names, "default": "simple"}
 
 
 @app.get("/api/examples")
@@ -959,12 +968,102 @@ async def list_job_files(job_id: str):
     return {"job_id": job_id, "files": files}
 
 
+@app.get("/api/pdb/{pdb_id}")
+async def fetch_pdb_id(pdb_id: str):
+    """Fetch a structure from the RCSB PDB by its 4-character ID.
+
+    Returns the raw PDB or mmCIF file content.  The front-end uses this
+    endpoint so the user can type a PDB ID (e.g. "1grm") and load the
+    structure without leaving the app.  We proxy through the service to
+    avoid CORS restrictions in the browser.
+    """
+    import urllib.request
+    pid = pdb_id.strip().lower()
+    if len(pid) != 4 or not pid.isalnum():
+        raise HTTPException(status_code=400, detail="PDB ID must be 4 alphanumeric characters")
+    # Try PDB format first (more widely supported), fall back to mmCIF.
+    urls = [
+        (f"https://files.rcsb.org/download/{pid}.pdb", "pdb"),
+        (f"https://files.rcsb.org/download/{pid}.cif", "cif"),
+    ]
+    last_err: str = ""
+    for url, fmt in urls:
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "hole2-web/1.0"})
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                content = resp.read()
+                if len(content) < 100:
+                    last_err = f"Empty response from {url}"
+                    continue
+                return JSONResponse({
+                    "pdb_id": pid,
+                    "format": fmt,
+                    "filename": f"{pid}.{fmt}",
+                    "content": content.decode("utf-8", errors="replace"),
+                    "size": len(content),
+                })
+        except urllib.error.HTTPError as e:
+            last_err = f"HTTP {e.code} from RCSB: {e.reason}"
+        except Exception as e:
+            last_err = str(e)
+    raise HTTPException(status_code=404, detail=f"PDB ID '{pid}' not found at RCSB. {last_err}")
+
+
+@app.get("/api/job/{job_id}/zip")
+async def download_job_zip(job_id: str):
+    """Stream a ZIP archive of all output files for a job."""
+    import io as _io
+    import zipfile
+    from fastapi.responses import StreamingResponse
+    job_dir = JOBS_DIR / job_id
+    if not job_dir.exists() or not job_dir.is_dir():
+        raise HTTPException(status_code=404, detail="Unknown job_id")
+    buf = _io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for p in sorted(job_dir.iterdir()):
+            if p.is_file():
+                zf.write(p, arcname=p.name)
+    buf.seek(0)
+    return StreamingResponse(
+        buf,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="hole2-{job_id}.zip"'},
+    )
+
+
+@app.get("/api/rad-sets")
+async def rad_sets_with_desc():
+    """List bundled vdw radius sets with descriptions to help the user choose."""
+    names: list[str] = []
+    rad_dir = Path(env_prefix()) / "share/hole2/rad"
+    if rad_dir.exists():
+        names = sorted(p.stem for p in rad_dir.glob("*.rad"))
+    if not names and HOLE2_REPO_RAD.exists():
+        names = sorted(p.stem for p in HOLE2_REPO_RAD.glob("*.rad"))
+    # Descriptions of each radius set (from the HOLE2 doc + .rad file headers).
+    descriptions = {
+        "simple": "Simple AMBER vdw radii — one value per element (C 1.85, O 1.65, N 1.75, etc.). Recommended for most protein channels. From Weiner et al. 1984 JACS.",
+        "amberuni": "AMBER united-atom radii — treats hydrogens implicitly (merged into heavy atoms). Use for structures without explicit hydrogens. Faster, slightly different radii than simple.rad.",
+        "bondi": "Bondi radii — widely-used compilation (Bondi 1964). Slightly larger vdW for polar atoms. Good for structures with explicit hydrogens.",
+        "hardcore": "Hard-sphere radii — smaller vdW (close-packed). Produces narrower pores. Use to test sensitivity to the radius set.",
+        "xplor": "X-PLOR/CNS radii — matches the X-PLOR simulation package conventions. Use if your structure came from X-PLOR/CNS.",
+    }
+    return {
+        "rad_sets": [
+            {"name": n, "description": descriptions.get(n, "HOLE2 vdw radius set")}
+            for n in names
+        ],
+        "default": "simple",
+    }
+
+
 @app.get("/")
 async def root():
     return {"service": "hole2", "endpoints": [
         "/api/health", "/api/rad-sets", "/api/examples",
         "/api/run (POST)", "/api/download/{job_id}/{filename}",
-        "/api/job/{job_id}/files",
+        "/api/job/{job_id}/files", "/api/job/{job_id}/zip",
+        "/api/pdb/{pdb_id}",
     ]}
 
 

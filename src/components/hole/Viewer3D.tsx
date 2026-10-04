@@ -6,6 +6,7 @@ import type { HoleSphere, HoleSurface } from '@/lib/hole/types'
 
 interface Viewer3DProps {
   pdbText: string | null
+  pdbName: string
   spheres: HoleSphere[]
   surface: HoleSurface
   centreline: [number, number, number][]
@@ -18,7 +19,7 @@ interface Viewer3DProps {
  * 3D viewer panel — mounts the three.js canvas, loads the PDB structure
  * + HOLE surface whenever the inputs change, and forwards option changes.
  */
-export function Viewer3D({ pdbText, spheres, surface, centreline, options, bgColor, onReady }: Viewer3DProps) {
+export function Viewer3D({ pdbText, pdbName, spheres, surface, centreline, options, bgColor, onReady }: Viewer3DProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const viewerRef = useRef<HoleViewer | null>(null)
 
@@ -45,8 +46,8 @@ export function Viewer3D({ pdbText, spheres, surface, centreline, options, bgCol
   useEffect(() => {
     const v = viewerRef.current
     if (!v || !pdbText) return
-    v.loadStructure(pdbText)
-  }, [pdbText])
+    v.loadStructure(pdbText, pdbName)
+  }, [pdbText, pdbName])
 
   // load hole results
   useEffect(() => {

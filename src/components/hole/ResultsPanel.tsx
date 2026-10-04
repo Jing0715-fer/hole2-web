@@ -1,13 +1,13 @@
 'use client'
 
 import { useMemo } from 'react'
-import { Download, FileText, Box, TrendingDown, Ruler, Activity, Zap, Loader2, AlertCircle } from 'lucide-react'
+import { Download, FileText, Box, TrendingDown, Ruler, Activity, Zap, Loader2, AlertCircle, Package } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import type { RunResult } from '@/lib/hole/types'
-import { downloadUrl, describeFile, type JobFile } from '@/lib/hole/api'
+import { downloadUrl, downloadZipUrl, describeFile, type JobFile } from '@/lib/hole/api'
 
 /** Best-effort file-size estimate from the result payload (avoids an extra
  *  round-trip to /api/job/{id}/files just to show sizes).  The exact size is
@@ -178,12 +178,24 @@ export function ResultsPanel({ result, loading, error }: ResultsPanelProps) {
       {/* Output files */}
       <Card className="border-border/60">
         <CardHeader className="pb-3">
-          <CardTitle className="flex items-center gap-2 text-base">
-            <Download className="size-4 text-emerald-500" />
-            Output files
+          <CardTitle className="flex items-center justify-between text-base">
+            <span className="flex items-center gap-2">
+              <Download className="size-4 text-emerald-500" />
+              Output files
+            </span>
+            {files.length > 0 && (
+              <a
+                href={downloadZipUrl(result.job_id)}
+                download={`hole2-${result.job_id}.zip`}
+                className="inline-flex items-center gap-1.5 rounded-md bg-emerald-600 px-2.5 py-1 text-[11px] font-medium text-white transition-colors hover:bg-emerald-700"
+              >
+                <Package className="size-3" />
+                Download all (.zip)
+              </a>
+            )}
           </CardTitle>
           <CardDescription className="text-xs">
-            Identical to the original HOLE2 command-line output. Click to download.
+            Identical to the original HOLE2 command-line output. Click a file to download.
           </CardDescription>
         </CardHeader>
         <CardContent>

@@ -50,14 +50,16 @@ export function ViewerControls({ options, onChange, onCapturePNG }: ViewerContro
         </CardTitle>
       </CardHeader>
       <CardContent className="space-y-2.5">
-        <Toggle icon={<Eye className="size-4" />} label="Cartoon ribbons" hint="Polymer backbone"
+        <Toggle icon={<Eye className="size-4" />} label="Cartoon" hint="Helix (red) / sheet (amber) / loop"
           checked={options.showCartoon} onChange={(v) => set({ showCartoon: v })} />
-        <Toggle icon={<Eye className="size-4" />} label="Ball & stick" hint="Atoms + bonds"
+        <Toggle icon={<Eye className="size-4" />} label="Ball & stick" hint="Ligands + hetero atoms"
           checked={options.showBallStick} onChange={(v) => set({ showBallStick: v })} />
         <Toggle icon={<Activity className="size-4" />} label="HOLE surface" hint="Triangulated pore wall"
           checked={options.showSurface} onChange={(v) => set({ showSurface: v })} />
         <Toggle icon={<LineChart className="size-4" />} label="Centre line" hint="Pore centre-line tube"
           checked={options.showCentreLine} onChange={(v) => set({ showCentreLine: v })} />
+        <Toggle icon={<EyeOff className="size-4" />} label="Pore side chains" hint="Residues lining the pore (≤6 Å)"
+          checked={options.showPoreSideChains} onChange={(v) => set({ showPoreSideChains: v })} />
         <Toggle icon={<EyeOff className="size-4" />} label="Sampled spheres" hint="Pore probe spheres"
           checked={options.showSpheres} onChange={(v) => set({ showSpheres: v })} />
 

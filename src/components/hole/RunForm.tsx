@@ -1,7 +1,7 @@
 'use client'
 
 import { useCallback, useRef, useState } from 'react'
-import { Upload, FileText, X, Settings2, Beaker } from 'lucide-react'
+import { Upload, FileText, X, Settings2, Beaker, Download, Loader2 } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -13,7 +13,7 @@ import { Slider } from '@/components/ui/slider'
 import { Badge } from '@/components/ui/badge'
 import { cn } from '@/lib/utils'
 import { DEFAULT_PARAMS, type RunParams } from '@/lib/hole/types'
-import type { ExampleInfo } from '@/lib/hole/api'
+import type { ExampleInfo, RadSetInfo } from '@/lib/hole/api'
 
 interface RunFormProps {
   params: RunParams
@@ -23,9 +23,11 @@ interface RunFormProps {
   onPdbFile: (file: File | null, name: string) => void
   customRad: File | null
   onCustomRad: (file: File | null) => void
-  radSets: string[]
+  radSets: RadSetInfo
   examples: ExampleInfo[]
   onPickExample: (ex: ExampleInfo, pdb: string) => void
+  onFetchPdbId: (pdbId: string) => Promise<void>
+  fetchingPdb: boolean
   onRun: () => void
   onReset: () => void
   running: boolean
@@ -35,10 +37,11 @@ interface RunFormProps {
 export function RunForm(props: RunFormProps) {
   const { params, onParamsChange, pdbFile, pdbName, onPdbFile,
     customRad, onCustomRad, radSets, examples, onPickExample,
-    onRun, onReset, running, disabled } = props
+    onFetchPdbId, fetchingPdb, onRun, onReset, running, disabled } = props
   const pdbInputRef = useRef<HTMLInputElement>(null)
   const radInputRef = useRef<HTMLInputElement>(null)
   const [advancedOpen, setAdvancedOpen] = useState(false)
+  const [pdbIdInput, setPdbIdInput] = useState('')
 
   const set = useCallback((patch: Partial<RunParams>) => {
     onParamsChange({ ...params, ...patch })
@@ -64,7 +67,7 @@ export function RunForm(props: RunFormProps) {
       <CardContent className="space-y-4">
         {/* PDB file upload */}
         <div className="space-y-2">
-          <Label className="text-xs font-medium">Input PDB structure</Label>
+          <Label className="text-xs font-medium">Input structure (PDB or mmCIF)</Label>
           <div
             className={cn(
               'group relative flex flex-col items-center justify-center rounded-lg border-2 border-dashed border-border/60 bg-muted/30 px-4 py-6 transition-colors',
@@ -80,7 +83,7 @@ export function RunForm(props: RunFormProps) {
             <input
               ref={pdbInputRef}
               type="file"
-              accept=".pdb,.ent,text/plain"
+              accept=".pdb,.ent,.cif,.mcif,text/plain"
               className="sr-only"
               onChange={(e) => handlePdbPick(e.target.files?.[0] ?? null)}
             />
@@ -111,11 +114,46 @@ export function RunForm(props: RunFormProps) {
                 onClick={() => pdbInputRef.current?.click()}
               >
                 <Upload className="size-6 text-muted-foreground" />
-                <span className="text-sm font-medium">Drop PDB here or click to browse</span>
-                <span className="text-xs text-muted-foreground">.pdb / .ent — max 50 MB</span>
+                <span className="text-sm font-medium">Drop structure here or click to browse</span>
+                <span className="text-xs text-muted-foreground">.pdb / .cif — max 50 MB</span>
               </button>
             )}
           </div>
+        </div>
+
+        {/* PDB ID fetch */}
+        <div className="space-y-1.5">
+          <Label className="text-xs font-medium">Or fetch from RCSB by PDB ID</Label>
+          <div className="flex gap-2">
+            <Input
+              value={pdbIdInput}
+              onChange={(e) => setPdbIdInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && pdbIdInput.trim() && !fetchingPdb) {
+                  e.preventDefault()
+                  onFetchPdbId(pdbIdInput.trim())
+                }
+              }}
+              placeholder="e.g. 1grm"
+              className="h-9 font-mono text-sm uppercase"
+              maxLength={4}
+              disabled={fetchingPdb}
+            />
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="h-9 px-3 text-xs"
+              disabled={fetchingPdb || pdbIdInput.trim().length !== 4}
+              onClick={() => onFetchPdbId(pdbIdInput.trim())}
+            >
+              {fetchingPdb ? <Loader2 className="size-3.5 animate-spin" /> : <Download className="size-3.5" />}
+              Fetch
+            </Button>
+          </div>
+          <p className="text-[10px] text-muted-foreground">
+            4-character RCSB ID (e.g. 1grm, 1bl8, 4hhb). Fetches from files.rcsb.org.
+          </p>
         </div>
 
         {/* Examples */}
@@ -159,11 +197,19 @@ export function RunForm(props: RunFormProps) {
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                {radSets.map((r) => (
-                  <SelectItem key={r} value={r}>{r}.rad</SelectItem>
+                {radSets.rad_sets.map((r) => (
+                  <SelectItem key={r.name} value={r.name}>
+                    <div className="flex flex-col">
+                      <span className="font-mono">{r.name}.rad</span>
+                      <span className="text-[10px] text-muted-foreground">{r.description}</span>
+                    </div>
+                  </SelectItem>
                 ))}
               </SelectContent>
             </Select>
+            <p className="text-[10px] leading-snug text-muted-foreground">
+              {radSets.rad_sets.find(r => r.name === params.radius_set)?.description ?? 'Pick a radius set'}
+            </p>
           </div>
           <div className="space-y-1.5">
             <Label htmlFor="endrad" className="text-xs font-medium">End radius (Å)</Label>
@@ -171,6 +217,9 @@ export function RunForm(props: RunFormProps) {
               value={params.endrad}
               onChange={(e) => set({ endrad: e.target.value })}
               className="h-9 font-mono" />
+            <p className="text-[10px] leading-snug text-muted-foreground">
+              Pore radius at which HOLE stops (5 Å = narrow channel)
+            </p>
           </div>
         </div>
 
