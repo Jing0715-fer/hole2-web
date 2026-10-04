@@ -74,3 +74,38 @@ Stage Summary:
 - lint clean, no console errors, no rendering glitches (VLM-verified)
 - README.md written, .gitignore updated (db/, download/, upload/, *.pid, micromamba env)
 - Ready to push to GitHub
+
+---
+Task ID: 3
+Agent: main
+Task: Fix user-reported issues: profile chart wrong radius, centre line zigzag, UI overlap, 1CHB surface not shown
+
+Work Log:
+- Investigated the profile chart issue: discovered the HOLE profile table header is "cenxyz.cvec | radius | cen_line_D | sum{s/(area)}" — 4 columns where col 1 = channel coordinate t, col 2 = pore radius r. The old parser was capturing col 4 (conductance integral) as the radius and interpreting cols 1-3 as x,y,z — completely wrong. The chart was plotting the conductance integral instead of the actual pore radius.
+- Rewrote ProfileSample dataclass to store (t, r, cen_line_d, cond_integral, kind) — matching the HOLE table columns exactly. Updated parse_hole_stdout to capture col 1 as t and col 2 as r.
+- Fixed min_t finding: now uses min() over parsed samples (not matching against the rounded "Minimum radius found:" string), so the constriction t-value is always correct.
+- Investigated the centre line zigzag: HOLE writes .sph spheres in "discovery order" (starts at cpoint, expands in both directions alternately). The old code used this raw order for the CatmullRom curve → zigzag. Fixed by sorting the spheres by their projection onto cvec before building the centre line tube.
+- Discovered HOLE masks cvec/cpoint with "************************" when auto-guessed (cguess). But cguess ALSO prints the actual values on separate "CVECT" / "CPOINT" lines. Added _CGUESS_CVECT and _CGUESS_CPOINT regexes to parse these as a fallback. Also added infer_channel_axis() PCA fallback for cases where neither the explicit nor cguess line is available.
+- Fixed .sph end-marker filtering: HOLE places "end" marker spheres at pore exits with residue sequence -888 and B-factor=0. The old filter `res_seq < 0` was too aggressive — it also removed the negative-indexed real pore spheres (resSeq -1, -2, ..., -70) that HOLE uses for the opposite-direction samples. Changed to `res_seq == -888` to only filter end markers.
+- Fixed parse_sph_file to use the B-factor column directly (not the occupancy fallback which was 14.05 for end markers instead of 0).
+- Fixed the UI overlap: replaced the shadcn ScrollArea (which had height-constraint issues in the narrow 320px right column) with a plain div + overflow-y-auto for the output files list. Also reduced the log <pre> max-height from 64 to 56.
+- Fixed the 1CHB surface issue: sos_triangle overflows on the large cholera pore with the default dotden=15. Added an auto-fallback: when sos_triangle fails with "Maximum number of polygons exceeded", the service automatically regenerates the .sos with dotden=5 and retries with faceted (non-smooth) mode. The original high-density .sos is preserved as solid_surface.sos.full for download. A non-fatal warning explains the fallback.
+- Fixed parse_sos_vmd to also handle "draw triangle" commands (faceted mode — 3 vertices, no normals) in addition to "draw trinorm" (smooth mode — 3 vertices + 3 normals). For faceted triangles, the face normal is computed via cross product of two edges.
+- Updated front-end types: ProfileSample now has (t, r, cen_line_d, cond_integral, kind) without x/y/z. PoreProfile.cvec/cpoint are now nullable (null when HOLE auto-guesses). RunSummary.min_pos removed (was always None anyway). RunResult.warnings added.
+- Set cholera toxin example to use dotden=5 by default (avoids the overflow entirely, no fallback needed).
+
+Verification (Agent Browser + VLM):
+- Gramicidin (1GRM): profile chart now shows the correct pore-radius curve (narrow constriction ~1.2 Å in the middle, wide ~5 Å at both ends). Centre line runs smoothly along the Y axis (no zigzag). cvec=[0,1,0] and cpoint=[-0.018,-0.012,4.217] correctly recovered from cguess output. min_r=1.199 at t=-9.51.
+- Cholera toxin (1CHB): pore correctly found (min R=3.035 Å, cpoint=[-2.71,39.99,20.82], cvect=[0,0,1]). Surface generated via auto-fallback (5565 triangles, faceted mode). Blue surface (wide pore) visible through the pentamer structure. Output files and log panels no longer overlap.
+- Maltoporin (1AF6): surface + centre line + profile all working.
+- Layout: output files panel and log panel properly separated, no overlap.
+
+Stage Summary:
+- All 4 user-reported issues fixed:
+  1. Profile chart now shows real HOLE-computed pore radii (col 2 of the profile table)
+  2. Centre line runs smoothly along the pore (spheres sorted by cvec projection, end markers filtered)
+  3. Output files / log panel overlap fixed (ScrollArea → plain overflow div)
+  4. 1CHB pore surface now generated via auto-fallback (dotden=5, faceted mode)
+- cvec/cpoint recovery: explicit → cguess-printed → PCA fallback chain
+- parse_sos_vmd handles both smooth (draw trinorm) and faceted (draw triangle) output modes
+- lint clean, no console errors, VLM-verified rendering on all 3 examples

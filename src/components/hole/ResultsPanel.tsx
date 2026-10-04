@@ -6,7 +6,6 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/com
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
-import { ScrollArea } from '@/components/ui/scroll-area'
 import type { RunResult } from '@/lib/hole/types'
 import { downloadUrl, describeFile, type JobFile } from '@/lib/hole/api'
 
@@ -188,30 +187,28 @@ export function ResultsPanel({ result, loading, error }: ResultsPanelProps) {
           </CardDescription>
         </CardHeader>
         <CardContent>
-          <ScrollArea className="max-h-72">
-            <div className="space-y-1.5">
-              {files.map((f) => (
-                <a
-                  key={f.name}
-                  href={downloadUrl(result.job_id, f.name)}
-                  download={f.name}
-                  className="flex items-center justify-between gap-3 rounded-md border border-border/40 bg-muted/20 px-3 py-2 transition-colors hover:border-emerald-500/40 hover:bg-emerald-500/5"
-                >
-                  <div className="flex min-w-0 items-center gap-2">
-                    <FileText className="size-4 shrink-0 text-muted-foreground" />
-                    <div className="min-w-0">
-                      <p className="truncate font-mono text-xs font-medium">{f.name}</p>
-                      <p className="truncate text-[10px] text-muted-foreground">{describeFile(f.name)}</p>
-                    </div>
+          <div className="max-h-64 space-y-1.5 overflow-y-auto pr-1">
+            {files.map((f) => (
+              <a
+                key={f.name}
+                href={downloadUrl(result.job_id, f.name)}
+                download={f.name}
+                className="flex items-center justify-between gap-3 rounded-md border border-border/40 bg-muted/20 px-3 py-2 transition-colors hover:border-emerald-500/40 hover:bg-emerald-500/5"
+              >
+                <div className="flex min-w-0 items-center gap-2">
+                  <FileText className="size-4 shrink-0 text-muted-foreground" />
+                  <div className="min-w-0">
+                    <p className="truncate font-mono text-xs font-medium">{f.name}</p>
+                    <p className="truncate text-[10px] text-muted-foreground">{describeFile(f.name)}</p>
                   </div>
-                  <div className="flex shrink-0 items-center gap-2">
-                    <Badge variant="outline" className="text-[10px]">{(f.size / 1024).toFixed(1)} KB</Badge>
-                    <Download className="size-3.5 text-muted-foreground" />
-                  </div>
-                </a>
-              ))}
-            </div>
-          </ScrollArea>
+                </div>
+                <div className="flex shrink-0 items-center gap-2">
+                  <Badge variant="outline" className="text-[10px]">{(f.size / 1024).toFixed(1)} KB</Badge>
+                  <Download className="size-3.5 text-muted-foreground" />
+                </div>
+              </a>
+            ))}
+          </div>
         </CardContent>
       </Card>
 
@@ -227,7 +224,7 @@ export function ResultsPanel({ result, loading, error }: ResultsPanelProps) {
           </CardDescription>
         </CardHeader>
         <CardContent>
-          <pre className="max-h-64 overflow-auto rounded-md border border-border/40 bg-muted/30 p-3 font-mono text-[11px] leading-relaxed text-muted-foreground">
+          <pre className="max-h-56 overflow-auto rounded-md border border-border/40 bg-muted/30 p-3 font-mono text-[11px] leading-relaxed text-muted-foreground">
             {result.log_tail}
           </pre>
         </CardContent>

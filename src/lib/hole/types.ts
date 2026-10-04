@@ -9,26 +9,37 @@
  * downloadable files match what the CLI produces byte-for-byte.
  */
 
-/** Single sampled point along the pore centre-line (from hole_out.txt). */
+/** Single sampled point along the pore centre-line (from hole_out.txt).
+ *
+ * The HOLE profile table has columns:
+ *   cenxyz.cvec | radius | cen_line_D | sum{s/(area)} | (sampled/mid-point)
+ * We capture each as a typed field below.
+ */
 export interface ProfileSample {
-  x: number
-  y: number
-  z: number
-  /** Pore radius at this sample (Ångström). */
-  r: number
-  /** Channel coordinate = dot product of (point - cpoint) with cvect. */
+  /** Channel coordinate = cenxyz.cvec (dot product of the sphere centre
+   *  with CVECT).  This is the abscissa HOLE itself uses for the pore graph. */
   t: number
+  /** Pore radius at this sample (Ångström) — the "radius" column. */
+  r: number
+  /** Distance along the pore centre line (cen_line_D column). */
+  cen_line_d: number
+  /** Cumulative conductance integral sum{s/(area)} — used for G_macro. */
+  cond_integral: number
   /** HOLE alternates "mid-point" and "sampled" rows; kept for parity. */
   kind: 'mid' | 'sampled'
 }
 
 /** Parsed pore-profile data (from hole stdout). */
 export interface PoreProfile {
-  cvec: [number, number, number]
-  cpoint: [number, number, number]
+  /** Channel vector.  Null when HOLE auto-guessed it (cguess masks the
+   *  value with "************************" in the log); we then recover it
+   *  via PCA on the .sph sphere centres (see infer_channel_axis). */
+  cvec: [number, number, number] | null
+  /** Channel centre point.  Null when HOLE auto-guessed it (same as cvec). */
+  cpoint: [number, number, number] | null
   samples: ProfileSample[]
   min_radius: number | null
-  min_pos: [number, number, number] | null
+  /** Channel coordinate of the constriction point (minimum radius). */
   min_t: number | null
   max_radius: number | null
   n_samples: number
@@ -67,7 +78,7 @@ export interface HoleSurface {
 export interface RunSummary {
   status: 'ok' | 'error'
   min_radius: number | null
-  min_pos: [number, number, number] | null
+  /** Channel coordinate of the constriction point. */
   min_t: number | null
   max_radius: number | null
   pore_length: number | null

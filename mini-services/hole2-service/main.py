@@ -126,21 +126,37 @@ def run_in_env(args: list[str], *, cwd: str, input_text: str | None = None,
 
 @dataclass
 class ProfileSample:
-    x: float
-    y: float
-    z: float
-    r: float          # pore radius (Angstrom)
-    t: float          # channel coordinate (dot product with cvect)
-    kind: str = "mid"  # "mid-point" or "sampled" — HOLE alternates
+    """One sampled point along the pore centre-line.
+
+    The HOLE profile table (printed near the end of hole_out.txt) has the
+    columns:  cenxyz.cvec | radius | cen_line_D | sum{s/(area)}  | (sampled/mid-point)
+
+    * ``t``  = cenxyz.cvec — the channel coordinate (dot product of the
+      sphere centre with CVECT).  This is what HOLE itself uses as the
+      abscissa of the pore-radius graph.
+    * ``r``  = radius — the pore radius at that point (Ångström).
+    * ``cen_line_d`` = cen_line_D — distance along the centre line.
+    * ``cond_integral`` = sum{s/(area)} — the cumulative conductance integral.
+    * ``kind`` — "mid-point" or "sampled" (HOLE alternates between them).
+    """
+    t: float                 # channel coordinate (cenxyz.cvec)
+    r: float                 # pore radius (Å)
+    cen_line_d: float = 0.0  # distance along centre line
+    cond_integral: float = 0.0  # sum{s/(area)} conductance integral
+    kind: str = "mid"        # "mid-point" or "sampled"
 
 
 @dataclass
 class PoreProfile:
-    cvec: list[float] = field(default_factory=lambda: [0.0, 0.0, 1.0])
-    cpoint: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.0])
+    """Parsed pore-profile data from hole_out.txt + hole_out.sph."""
+    # cvec / cpoint are masked with ************************ when HOLE auto-guesses
+    # them (the common case).  We try to parse them from the log, but when
+    # masked we leave them as None and infer the channel axis from the .sph
+    # sphere centres via PCA (see infer_channel_axis()).
+    cvec: Optional[list[float]] = None
+    cpoint: Optional[list[float]] = None
     samples: list[ProfileSample] = field(default_factory=list)
     min_radius: Optional[float] = None
-    min_pos: Optional[list[float]] = None
     min_t: Optional[float] = None
     max_radius: Optional[float] = None
     n_samples: int = 0
@@ -154,9 +170,14 @@ class PoreProfile:
 # Parsers — extract structured data from the raw hole stdout + .sph file
 # ---------------------------------------------------------------------------
 
-# Matches lines like:
+# Matches a HOLE profile-table line, e.g.:
 #     13.36275     2.07545    15.40980     4.23599 (mid-point)
 #     13.48775     2.14099    15.54228     4.24467   (sampled)
+# The 4 numeric columns are (per the HOLE header "cenxyz.cvec  radius  cen_line_D  sum{s/(area)}"):
+#   col 1 = cenxyz.cvec (channel coordinate t)
+#   col 2 = radius (pore radius in Å)
+#   col 3 = cen_line_D (distance along centre line)
+#   col 4 = sum{s/(area)} (conductance integral)
 # Connolly mode may append extra columns before the (mid-point|sampled) tag:
 #     31.56571     4.21656    12.36435     0.35151 1000000.000       6.506       0.149   (sampled)
 _PROFILE_LINE = re.compile(
@@ -164,37 +185,65 @@ _PROFILE_LINE = re.compile(
 )
 # "Minimum radius found:      1.198 angstroms."
 _MIN_RADIUS = re.compile(r"Minimum radius found:\s+(-?\d+\.\d+)", re.I)
-# "channel vector:   0.000    0.000    1.000"
+# "channel vector:   0.000    0.000    1.000"  (masked with *** when auto-guessed)
 _CVECT = re.compile(r"channel vector:\s+(-?\d+\.\d+)\s+(-?\d+\.\d+)\s+(-?\d+\.\d+)", re.I)
-# "point in channel:   ..."
+# "point in channel:   ..."  (masked with *** when auto-guessed)
 _CPOINT = re.compile(r"point in channel:\s+(-?\d+\.\d+)\s+(-?\d+\.\d+)\s+(-?\d+\.\d+)", re.I)
+# When HOLE auto-guesses (cguess), the "channel vector:" line is masked with
+# "************************", but cguess then prints the actual values on a
+# separate line:  "CPOINT      -0.0178     -0.0122      4.2174" /
+# "CVECT        0.0000      1.0000      0.0000".  We parse these as a fallback.
+_CGUESS_CVECT = re.compile(r"^CVECT\s+(-?\d+\.\d+)\s+(-?\d+\.\d+)\s+(-?\d+\.\d+)", re.I | re.M)
+_CGUESS_CPOINT = re.compile(r"^CPOINT\s+(-?\d+\.\d+)\s+(-?\d+\.\d+)\s+(-?\d+\.\d+)", re.I | re.M)
 # "F= sum(ds/area) along channel is    4.370 angstroms**-1"
 _G_FACTOR = re.compile(r"F=\s*sum\(ds/area\).*?is\s+(-?\d+\.\d+)", re.I)
-# "(23/rho) pS,"  the 23 is F inverted ×100; we want Gmacro value
+# "Gmacro=   274.60041"
 _GMACRO = re.compile(r"Gmacro=\s*(-?\d+\.\d+)", re.I)
 
 
 def parse_hole_stdout(text: str) -> PoreProfile:
-    """Parse the human-readable hole_out.txt into a structured PoreProfile."""
+    """Parse the human-readable hole_out.txt into a structured PoreProfile.
+
+    The profile table near the end of the log has columns:
+        cenxyz.cvec | radius | cen_line_D | sum{s/(area)} | (sampled/mid-point)
+    We capture col 1 as the channel coordinate t and col 2 as the pore radius r.
+    """
     prof = PoreProfile()
+
+    # cvec / cpoint — HOLE masks "channel vector:" and "point in channel:"
+    # with "************************" when it auto-guesses via cguess.  But
+    # cguess also prints the actual values on separate CVECT/CPOINT lines
+    # right after the masking.  We try the explicit line first, then fall
+    # back to the cguess-printed line.
     cv = _CVECT.search(text)
     if cv:
         prof.cvec = [float(cv.group(1)), float(cv.group(2)), float(cv.group(3))]
+    else:
+        cvg = _CGUESS_CVECT.search(text)
+        if cvg:
+            prof.cvec = [float(cvg.group(1)), float(cvg.group(2)), float(cvg.group(3))]
     cp = _CPOINT.search(text)
     if cp:
         prof.cpoint = [float(cp.group(1)), float(cp.group(2)), float(cp.group(3))]
+    else:
+        cpg = _CGUESS_CPOINT.search(text)
+        if cpg:
+            prof.cpoint = [float(cpg.group(1)), float(cpg.group(2)), float(cpg.group(3))]
 
-    cx, cy, cz = prof.cvec
-    px, py, pz = prof.cpoint
+    # Profile samples — capture the 4 columns from each (sampled/mid-point) line
     for line in text.splitlines():
         m = _PROFILE_LINE.match(line)
         if not m:
             continue
-        x, y, z, r = (float(m.group(i)) for i in (1, 2, 3, 4))
+        t = float(m.group(1))      # cenxyz.cvec — channel coordinate
+        r = float(m.group(2))      # radius — pore radius (Å)
+        cen_line_d = float(m.group(3))
+        cond_int = float(m.group(4))
         kind = "mid" if m.group(5) == "mid-point" else "sampled"
-        # channel coordinate = dot product of (point - cpoint) with cvec
-        t = (x - px) * cx + (y - py) * cy + (z - pz) * cz
-        prof.samples.append(ProfileSample(x=x, y=y, z=z, r=r, t=t, kind=kind))
+        prof.samples.append(ProfileSample(
+            t=t, r=r, cen_line_d=cen_line_d,
+            cond_integral=cond_int, kind=kind,
+        ))
 
     mn = _MIN_RADIUS.search(text)
     if mn:
@@ -211,21 +260,111 @@ def parse_hole_stdout(text: str) -> PoreProfile:
         prof.n_samples = len(prof.samples)
         rs = [s.r for s in prof.samples]
         prof.max_radius = max(rs)
-        # pore length = t-range
         ts = [s.t for s in prof.samples]
         prof.pore_length = max(ts) - min(ts)
-        if prof.min_radius is not None:
-            # find first sample with the min radius
-            for s in prof.samples:
-                if abs(s.r - prof.min_radius) < 1e-4:
-                    prof.min_pos = [s.x, s.y, s.z]
-                    prof.min_t = s.t
-                    break
+        # Find the constriction point — the sample with the smallest radius.
+        # We use the actual minimum of the parsed samples (not the rounded
+        # value from the "Minimum radius found:" line) so the t-value matches
+        # exactly.
+        min_sample = min(prof.samples, key=lambda s: s.r)
+        prof.min_radius = min_sample.r
+        prof.min_t = min_sample.t
     return prof
 
 
+def infer_channel_axis(spheres: list[dict]) -> tuple[list[float], list[float]]:
+    """Infer the pore channel axis + centre from the .sph sphere centres.
+
+    HOLE masks cvec/cpoint with "************************" in the log when
+    it auto-guesses them (the common case).  We recover the channel
+    direction by PCA on the sphere centres — the dominant axis of variation
+    IS the channel direction.  The centroid is a good approximation of
+    cpoint.
+
+    Returns (cvec_unit, cpoint) or ([0,0,1], [0,0,0]) if too few spheres.
+    """
+    if len(spheres) < 4:
+        return [0.0, 0.0, 1.0], [0.0, 0.0, 0.0]
+    import math
+    n = len(spheres)
+    # centroid
+    cx = sum(s["x"] for s in spheres) / n
+    cy = sum(s["y"] for s in spheres) / n
+    cz = sum(s["z"] for s in spheres) / n
+    # covariance matrix (3x3, symmetric)
+    sxx = syy = szz = sxy = sxz = syz = 0.0
+    for s in spheres:
+        dx, dy, dz = s["x"] - cx, s["y"] - cy, s["z"] - cz
+        sxx += dx * dx; syy += dy * dy; szz += dz * dz
+        sxy += dx * dy; sxz += dx * dz; syz += dy * dz
+    cov = [
+        sxx / n, sxy / n, sxz / n,
+        sxy / n, syy / n, syz / n,
+        sxz / n, syz / n, szz / n,
+    ]
+    # Jacobi eigen-decomposition of the 3x3 symmetric matrix
+    m = list(cov)
+    v = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+    for _ in range(50):
+        off = 0.0
+        for i in range(3):
+            for j in range(i + 1, 3):
+                off += m[i * 3 + j] * m[i * 3 + j]
+        if off < 1e-18:
+            break
+        for p in range(2):
+            for q in range(p + 1, 3):
+                if abs(m[p * 3 + q]) < 1e-16:
+                    continue
+                theta = (m[q * 3 + q] - m[p * 3 + p]) / (2 * m[p * 3 + q])
+                t = math.copysign(1.0, theta) / (abs(theta) + math.sqrt(theta * theta + 1))
+                c = 1.0 / math.sqrt(t * t + 1)
+                s = t * c
+                for k in range(3):
+                    mkp = m[k * 3 + p]; mkq = m[k * 3 + q]
+                    m[k * 3 + p] = c * mkp - s * mkq
+                    m[k * 3 + q] = s * mkp + c * mkq
+                for k in range(3):
+                    mpk = m[p * 3 + k]; mqk = m[q * 3 + k]
+                    m[p * 3 + k] = c * mpk - s * mqk
+                    m[q * 3 + k] = s * mpk + c * mqk
+                for k in range(3):
+                    vkp = v[k * 3 + p]; vkq = v[k * 3 + q]
+                    v[k * 3 + p] = c * vkp - s * vkq
+                    v[k * 3 + q] = s * vkp + c * vkq
+    # eigenvalues = m[0], m[4], m[8]; eigenvectors = columns of v
+    vals = [m[0], m[4], m[8]]
+    vecs = [
+        [v[0], v[3], v[6]],
+        [v[1], v[4], v[7]],
+        [v[2], v[5], v[8]],
+    ]
+    # pick the eigenvector with the largest eigenvalue = channel direction
+    best = max(range(3), key=lambda i: vals[i])
+    axis = vecs[best]
+    # normalise
+    norm = math.sqrt(sum(c * c for c in axis))
+    if norm < 1e-12:
+        return [0.0, 0.0, 1.0], [cx, cy, cz]
+    cvec = [c / norm for c in axis]
+    return cvec, [cx, cy, cz]
+
+
 def parse_sph_file(path: Path) -> list[dict]:
-    """Parse a HOLE .sph file (pseudo-PDB) into a compact list of sphere dicts."""
+    """Parse a HOLE .sph file (pseudo-PDB) into a compact list of sphere dicts.
+
+    Each ATOM record represents one pore-sphere centre:
+      - columns 31-54: x, y, z of the sphere centre
+      - columns 55-60: occupancy (= pore radius for real spheres; a large
+        number for "end" markers)
+      - columns 61-66: B-factor (= pore radius for real spheres; 0.00 for
+        "end" markers)
+      - columns 23-26: residue sequence number — real spheres have a
+        non-negative index (0, 1, 2, ...); HOLE uses **-888** as a sentinel
+        for the "end" marker spheres it places at the pore exits (where
+        radius ≥ endrad).  These end markers form a 2D grid at each exit
+        and would distort the centre line if included, so we skip them.
+    """
     out: list[dict] = []
     if not path.exists():
         return out
@@ -233,15 +372,26 @@ def parse_sph_file(path: Path) -> list[dict]:
         for line in f:
             if not line.startswith("ATOM"):
                 continue
+            try:
+                res_seq = int(line[22:26].strip())
+            except (ValueError, IndexError):
+                res_seq = 0
+            # Skip HOLE's "end" marker spheres (residue sequence = -888).
+            # These are placed at the pore exits (radius ≥ endrad) as a 2D
+            # grid and are NOT part of the pore centre line.  Note: HOLE
+            # numbers the spheres on one side of cpoint as 0, 1, 2, ... and
+            # the other side as -1, -2, ... — those negative-indexed spheres
+            # ARE real pore spheres and must be kept.
+            if res_seq == -888:
+                continue
             # PDB columns: fixed-width
             try:
                 x = float(line[30:38].strip())
                 y = float(line[38:46].strip())
                 z = float(line[46:54].strip())
-                occ = float(line[54:60].strip())  # = radius
-                bfac = float(line[60:66].strip())  # = radius again
-                r = bfac if bfac else occ
-                out.append({"x": x, "y": y, "z": z, "r": r})
+                bfac = float(line[60:66].strip())  # B-factor = pore radius
+                r = bfac
+                out.append({"x": x, "y": y, "z": z, "r": r, "idx": res_seq})
             except (ValueError, IndexError):
                 continue
     return out
@@ -252,8 +402,16 @@ def parse_sos_vmd(path: Path) -> dict:
 
     Returns ``{"triangles": [{vertices, normals, color}, ...], "colors": [...]}``
     where each triangle has 3 vertex triples and 3 normal triples (each [x,y,z]).
-    This matches the front-end ``HoleTriangle`` type exactly.
+
+    sos_triangle has two output modes:
+      - Smooth (-s):  ``draw trinorm  {v0} {v1} {v2} {n0} {n1} {n2}``
+        (6 triples — 3 vertices + 3 normals)
+      - Faceted (default):  ``draw triangle  {v0} {v1} {v2}``
+        (3 triples — vertices only, no normals; we compute the face normal
+        via the cross product of two edges)
     """
+    import math
+
     tris: list[dict] = []
     colors: list[str] = []
     cur_color = ""
@@ -268,13 +426,36 @@ def parse_sos_vmd(path: Path) -> dict:
                 cur_color = line.split("draw color", 1)[1].strip()
                 continue
             if line.startswith("draw trinorm"):
-                # draw trinorm  { x y z } { x y z } { x y z } { nx ny nz } { nx ny nz } { nx ny nz }
+                # Smooth mode: 6 triples = 3 vertices + 3 normals
                 m = re.findall(r"\{\s*(-?\d+\.\d+)\s+(-?\d+\.\d+)\s+(-?\d+\.\d+)\s*\}", line)
                 if len(m) == 6:
                     v = [list(map(float, p)) for p in m]
                     tris.append({
-                        "vertices": v[:3],   # [[x,y,z],[x,y,z],[x,y,z]]
-                        "normals": v[3:],     # [[x,y,z],[x,y,z],[x,y,z]]
+                        "vertices": v[:3],
+                        "normals": v[3:],
+                        "color": cur_color,
+                    })
+                    colors.append(cur_color)
+            elif line.startswith("draw triangle"):
+                # Faceted mode: 3 triples = vertices only, no normals.
+                # Compute the face normal via cross product of two edges.
+                m = re.findall(r"\{\s*(-?\d+\.\d+)\s+(-?\d+\.\d+)\s+(-?\d+\.\d+)\s*\}", line)
+                if len(m) == 3:
+                    v = [list(map(float, p)) for p in m]
+                    # v0, v1, v2
+                    e1 = [v[1][i] - v[0][i] for i in range(3)]
+                    e2 = [v[2][i] - v[0][i] for i in range(3)]
+                    # normal = e1 × e2
+                    nx = e1[1] * e2[2] - e1[2] * e2[1]
+                    ny = e1[2] * e2[0] - e1[0] * e2[2]
+                    nz = e1[0] * e2[1] - e1[1] * e2[0]
+                    norm = math.sqrt(nx * nx + ny * ny + nz * nz)
+                    if norm > 1e-12:
+                        nx /= norm; ny /= norm; nz /= norm
+                    n = [[nx, ny, nz]] * 3  # flat normal shared by all 3 verts
+                    tris.append({
+                        "vertices": v,
+                        "normals": n,
                         "color": cur_color,
                     })
                     colors.append(cur_color)
@@ -306,6 +487,8 @@ class RunResult:
     returncode: int
     error: Optional[str] = None
     warnings: list[str] = field(default_factory=list)
+    # Centre-line points sorted by channel coordinate (for the 3D viewer tube)
+    centreline: list[list[float]] = field(default_factory=list)
 
 
 def build_hole_inp(params: dict, pdb_name: str, rad_path: str, sphpdb_name: str) -> str:
@@ -424,40 +607,69 @@ async def run_hole_pipeline(pdb_bytes: bytes, pdb_name: str,
     # 3) sos_triangle → .vmd_plot
     # sos_triangle reads the .sos file from STDIN and writes the VMD draw
     # commands to STDOUT.  It can fail on large pores with "Maximum number of
-    # polygons exceeded" — in that case we leave the .sos file in place
-    # (which the user can still download and feed to sos_triangle locally
-    # with different flags) and record a warning in the result payload.
+    # polygons exceeded".  In that case we automatically retry with a lower
+    # dot density (dotden=5) and faceted (non-smooth) mode — if that also
+    # fails, we leave the .sos file in place for download and record a warning.
     vmd_path = work_dir / "solid_surface.vmd_plot"
     smooth = params.get("smooth_surface", True)
     sos_warning: str | None = None
+
+    async def _try_sos_triangle(sos_content: bytes, use_smooth: bool) -> tuple[list[str], str, int]:
+        """Run sos_triangle once and return (draw_lines, stderr, returncode)."""
+        sos_cmd = [env_bin("sos_triangle")]
+        if use_smooth:
+            sos_cmd.append("-s")
+        env = {**os.environ, "PATH": f"{env_prefix()}/bin:{os.environ.get('PATH','')}"}
+        proc = await asyncio.to_thread(
+            lambda: subprocess.run(
+                sos_cmd, input=sos_content, capture_output=True,
+                cwd=str(work_dir), env=env, timeout=180,
+            )
+        )
+        stdout = (proc.stdout or b"").decode(errors="replace")
+        stderr = (proc.stderr or b"").decode(errors="replace")
+        draw_lines = [ln for ln in stdout.splitlines() if ln.startswith("draw ")]
+        return draw_lines, stderr, proc.returncode
+
     try:
         if solid_sos.exists() and solid_sos.stat().st_size > 0:
             sos_content = solid_sos.read_bytes()
-            sos_cmd = [env_bin("sos_triangle")]
-            if smooth:
-                sos_cmd.append("-s")
-            env = {**os.environ, "PATH": f"{env_prefix()}/bin:{os.environ.get('PATH','')}"}
-            proc = await asyncio.to_thread(
-                lambda: subprocess.run(
-                    sos_cmd, input=sos_content, capture_output=True,
-                    cwd=str(work_dir), env=env, timeout=180,
-                )
-            )
-            # sos_triangle writes a header to stderr (progress chatter) and
-            # the VMD "draw ..." commands to stdout.  Keep only the draw lines
-            # so the .vmd_plot is a clean VMD script.
-            stdout = proc.stdout or b""
-            stderr = (proc.stderr or b"").decode(errors="replace")
-            draw_lines = [ln for ln in stdout.decode(errors="replace").splitlines()
-                          if ln.startswith("draw ")]
+            # First attempt with the user-requested settings
+            draw_lines, stderr, _ = await _try_sos_triangle(sos_content, smooth)
+            if not draw_lines and "Maximum number of polygons exceeded" in stderr:
+                # Auto-fallback: regenerate .sos with dotden=5 (minimum density)
+                # and try again with faceted (non-smooth) mode.  This handles
+                # large pores like the cholera-toxin pentamer.  Keep the
+                # original .sos as .sos.full for download.
+                try:
+                    # Preserve the original high-density .sos for download
+                    if solid_sos.exists():
+                        shutil.copy2(solid_sos, work_dir / "solid_surface.sos.full")
+                    rc_fb, _, _ = await asyncio.to_thread(
+                        run_in_env,
+                        [env_bin("sph_process"), "-sos", "-dotden", "5", "-color",
+                         str(sph_path), str(solid_sos)],
+                        cwd=str(work_dir), input_text=None, timeout=120,
+                    )
+                    if solid_sos.exists() and solid_sos.stat().st_size > 0:
+                        sos_content = solid_sos.read_bytes()
+                        draw_lines, stderr, _ = await _try_sos_triangle(sos_content, False)
+                        if draw_lines:
+                            sos_warning = ("sos_triangle exceeded its polygon limit with the "
+                                           "requested settings — used auto-fallback (dotden=5, "
+                                           "faceted surface) to generate the 3D mesh. The full-density "
+                                           ".sos is also available as solid_surface.sos.full.")
+                except Exception:
+                    pass
+
             if draw_lines:
                 vmd_path.write_text("\n".join(draw_lines) + "\n")
             else:
-                # sos_triangle produced no draw commands — surface too large
                 if "Maximum number of polygons exceeded" in stderr:
-                    sos_warning = ("sos_triangle exceeded its polygon limit on this large pore. "
+                    sos_warning = ("sos_triangle exceeded its polygon limit on this large pore, "
+                                   "even with the auto-fallback (dotden=5, faceted). "
                                    "The .sos intermediate file is still available for download — "
-                                   "try a smaller endrad or dotden locally. The 3D surface will not be shown.")
+                                   "try a smaller endrad locally. The 3D surface will not be shown.")
                 else:
                     sos_warning = f"sos_triangle produced no output. stderr: {stderr[-300:]}"
     except subprocess.TimeoutExpired:
@@ -496,11 +708,30 @@ async def run_hole_pipeline(pdb_bytes: bytes, pdb_name: str,
     spheres = parse_sph_file(sph_path)
     surface = parse_sos_vmd(vmd_path)
 
+    # If cvec/cpoint were masked (auto-guessed by HOLE's cguess), recover the
+    # channel axis from the .sph sphere centres via PCA.  This lets us build
+    # a properly-ordered centre line (sorted by channel coordinate) and
+    # report the constriction position in 3D.
+    if profile.cvec is None or profile.cpoint is None:
+        inferred_cvec, inferred_cpoint = infer_channel_axis(spheres)
+        if profile.cvec is None:
+            profile.cvec = inferred_cvec
+        if profile.cpoint is None:
+            profile.cpoint = inferred_cpoint
+
+    # Sort the .sph spheres by their projection onto cvec so the centre-line
+    # tube in the 3D viewer runs smoothly along the pore (HOLE writes them in
+    # discovery order which zigzags from the cpoint outward in both directions).
+    cvx, cvy, cvz = profile.cvec or [0.0, 0.0, 1.0]
+    cpx, cpy, cpz = profile.cpoint or [0.0, 0.0, 0.0]
+    spheres_sorted = sorted(spheres, key=lambda s: (
+        (s["x"] - cpx) * cvx + (s["y"] - cpy) * cvy + (s["z"] - cpz) * cvz
+    ))
+
     # Build a summary card
     summary = {
         "status": "ok",
         "min_radius": profile.min_radius,
-        "min_pos": profile.min_pos,
         "min_t": profile.min_t,
         "max_radius": profile.max_radius,
         "pore_length": profile.pore_length,
@@ -519,6 +750,7 @@ async def run_hole_pipeline(pdb_bytes: bytes, pdb_name: str,
         summary=summary, files=files,
         log_tail=out[-3000:], returncode=0, error=None,
         warnings=warnings,
+        centreline=[[s["x"], s["y"], s["z"]] for s in spheres_sorted[:5000]],
     )
 
 
@@ -678,7 +910,9 @@ async def run_hole(
             "triangles": result.surface.get("triangles", [])[:20000],
             "colors": result.surface.get("colors", [])[:20000],
         },
-        "centreline": [[s["x"], s["y"], s["z"]] for s in result.spheres[:5000]],
+        # Centre-line points sorted by channel coordinate (cvec projection)
+        # so the 3D viewer's tube runs smoothly along the pore.
+        "centreline": result.centreline[:5000],
         "files": result.files,
         "log_tail": result.log_tail,
         "input_file": "hole.inp",

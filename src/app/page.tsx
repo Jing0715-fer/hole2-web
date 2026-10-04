@@ -86,15 +86,18 @@ export default function Home() {
         next.endrad = '5.0'
         next.ignore_residues = ''
         next.shorto = '0'  // full output so the profile is parsed
+        next.dotden = '15'
       } else if (ex.id.includes('choleratoxin')) {
         next.connolly = true
         next.ignore_residues = 'HOH TIP WAT'
         next.shorto = '0'  // shorto=2 suppresses the profile; keep full so we can plot it
+        next.dotden = '5'  // lower density — sos_triangle overflows on this large pore at higher dotden
       } else if (ex.id.includes('maltoporin')) {
         next.cvect_x = '0.0'; next.cvect_y = '0.0'; next.cvect_z = '1.0'
         next.cpoint_x = '-14.285'; next.cpoint_y = '47.809'; next.cpoint_z = '82.707'
         next.ignore_residues = 'FRU GLC MG HOH'
         next.shorto = '0'
+        next.dotden = '15'
       }
       setParams(next)
       toast.success(`Loaded ${pdb} (${(blob.size / 1024).toFixed(1)} KB)`)
