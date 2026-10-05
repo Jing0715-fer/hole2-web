@@ -1,6 +1,9 @@
 #!/bin/bash
-# Start both the Python HOLE2 service and the Next.js production server.
+# Start both the Python HOLE2 service and the Next.js standalone server.
 # Uses setsid to detach from the terminal so processes survive bash session exits.
+#
+# This script is designed for the sandbox environment where "output: standalone"
+# is required by .zscripts/build.sh and .zscripts/start.sh.
 
 cd /home/z/my-project
 
@@ -12,16 +15,19 @@ if ! pgrep -f "uvicorn main:app" > /dev/null 2>&1; then
   sleep 2
 fi
 
-# 2. Build Next.js if .next doesn't exist
-if [ ! -f .next/BUILD_ID ]; then
-  echo "Building Next.js production bundle..."
+# 2. Build Next.js if .next/standalone doesn't exist
+if [ ! -f .next/standalone/server.js ]; then
+  echo "Building Next.js production bundle (with standalone output)..."
   NODE_OPTIONS="--max-old-space-size=2048" npx next build 2>&1 | tail -5
+  # Copy static files into the standalone dir (required for serving)
+  cp -r .next/static .next/standalone/.next/ 2>/dev/null
+  cp -r public .next/standalone/ 2>/dev/null
 fi
 
-# 3. Start Next.js production server (port 3000) if not running
-if ! pgrep -f "next-server" > /dev/null 2>&1; then
-  echo "Starting Next.js production server on port 3000..."
-  setsid bash -c 'cd /home/z/my-project && exec npx next start -p 3000' > /tmp/next-prod.log 2>&1 < /dev/null &
+# 3. Start Next.js standalone server (port 3000) if not running
+if ! pgrep -f "standalone/server.js" > /dev/null 2>&1; then
+  echo "Starting Next.js standalone server on port 3000..."
+  setsid bash -c 'cd /home/z/my-project/.next/standalone && PORT=3000 exec node server.js' > /tmp/next-prod.log 2>&1 < /dev/null &
   disown
   sleep 5
 fi
