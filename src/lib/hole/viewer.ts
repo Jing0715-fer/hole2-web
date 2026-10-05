@@ -211,7 +211,7 @@ export class HoleViewer {
     const w = container.clientWidth || 800
     const h = container.clientHeight || 600
 
-    this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false })
+    this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false, preserveDrawingBuffer: true })
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
     this.renderer.setSize(w, h)
     this.renderer.setClearColor(0x0b1220, 1)
@@ -327,7 +327,10 @@ export class HoleViewer {
     }
 
     this.updateVisibility()
-    this.fitView()
+    // Defer fitView to the next animation frame so the canvas has its
+    // final layout size (the container div may still be sizing when this
+    // effect runs, causing the camera framing to be wrong).
+    requestAnimationFrame(() => this.fitView())
   }
 
   /** Load the HOLE surface mesh + centre line + spheres. */
@@ -373,20 +376,24 @@ export class HoleViewer {
     }
 
     this.updateVisibility()
-    this.fitView()
+    requestAnimationFrame(() => this.fitView())
   }
 
   private buildCartoon(s: PdbStructure, chainColorMap: Map<string, number>) {
     // Secondary-structure-aware cartoon:
-    //   - helix residues → thick rounded tube (radius 0.55) in helix colour
-    //   - sheet residues → flat arrow (width 1.6, thickness 0.25) in sheet colour
-    //   - loop residues → thin tube (radius 0.22) in chain colour
+    //   - helix residues → thick rounded tube (radius 0.5) in helix colour
+    //   - sheet residues → flat ribbon in sheet colour
+    //   - loop residues → medium tube (radius 0.3) in chain colour
     // SS comes from PDB HELIX/SHEET records (or mmCIF _struct_conf).
-    // For nucleic chains, render a smooth tube through P atoms (no SS).
+    // If the file has NO SS records (e.g. gramicidin, NMR structures), we
+    // default to treating all polymer residues as helix — this gives a
+    // reasonable thick tube for mostly-helical structures instead of a
+    // hair-thin line.
+    const noSS = !s.ssFromRecords
     for (const chain of s.chains) {
       if (!chain.polymer) continue
       // Collect backbone anchors + their SS for this chain
-      const anchors: { pos: THREE.Vector3; ss: 'H' | 'E' | 'L'; resSeq: number }[] = []
+      const anchors: { pos: THREE.Vector3; ss: 'H' | 'E' | 'L' }[] = []
       for (const ri of chain.residueIdx) {
         const r = s.residues[ri]
         let anchor = -1
@@ -402,74 +409,50 @@ export class HoleViewer {
         }
         if (anchor >= 0) {
           const a = s.atoms[anchor]
+          // If no SS records, default to 'H' (helix) for a thicker, more
+          // visible tube — most ion channels are helical.
           anchors.push({
             pos: new THREE.Vector3(a.x, a.y, a.z),
-            ss: r.ss,
-            resSeq: r.resSeq,
+            ss: noSS ? 'H' : r.ss,
           })
         }
       }
       if (anchors.length < 2) continue
 
       // Detect chain breaks (consecutive CA distance > 8 Å → new segment)
-      const segments: typeof anchors[] = [[anchors[0]]]
-      for (let i = 1; i < anchors.length; i++) {
-        if (anchors[i].pos.distanceTo(anchors[i - 1].pos) > 8.0) {
-          segments.push([anchors[i]])
-        } else {
-          segments[segments.length - 1].push(anchors[i])
+      const segments: THREE.Vector3[][] = []
+      let curSeg: THREE.Vector3[] = []
+      for (let i = 0; i < anchors.length; i++) {
+        if (i > 0 && anchors[i].pos.distanceTo(anchors[i - 1].pos) > 8.0) {
+          if (curSeg.length >= 2) segments.push(curSeg)
+          curSeg = []
         }
+        curSeg.push(anchors[i].pos)
       }
+      if (curSeg.length >= 2) segments.push(curSeg)
 
       const chainCol = chainColorMap.get(chain.id) ?? 0x10b981
-      // Build cartoon segments: for each contiguous SS run, build the right geometry
+      // For each continuous segment, build a single smooth tube through
+      // all CA atoms.  We colour it based on the dominant SS type (or chain
+      // colour if no SS records).
       for (const seg of segments) {
-        if (seg.length < 2) continue
-        // Smooth the backbone with Catmull-Rom for nicer curves
-        const positions = seg.map(a => a.pos)
-        // Group consecutive residues by SS type
-        let i = 0
-        while (i < seg.length) {
-          const ss = seg[i].ss
-          let j = i
-          while (j < seg.length && seg[j].ss === ss) j++
-          // segment from i..j (exclusive)
-          const runPts = positions.slice(Math.max(0, i - 1), Math.min(seg.length, j + 1))
-          if (runPts.length >= 2) {
-            const curve = new THREE.CatmullRomCurve3(runPts, false, 'catmullrom', 0.5)
-            const tubularSeg = Math.max(8, runPts.length * 6)
-            if (ss === 'H') {
-              // Helix → thick rounded tube
-              const tubeGeo = new THREE.TubeGeometry(curve, tubularSeg, 0.55, 12, false)
-              const mat = new THREE.MeshStandardMaterial({
-                color: 0xe0566b, roughness: 0.4, metalness: 0.05,
-              })
-              const mesh = new THREE.Mesh(tubeGeo, mat)
-              this.structureGroup.add(mesh)
-              this.disposables.push(tubeGeo, mat)
-            } else if (ss === 'E') {
-              // Sheet → flat ribbon: create a tube then flatten it by scaling
-              const tubeGeo = new THREE.TubeGeometry(curve, tubularSeg, 0.25, 4, false)
-              tubeGeo.scale(3.2, 0.5, 1)
-              const mat = new THREE.MeshStandardMaterial({
-                color: 0xf0a830, roughness: 0.4, metalness: 0.05, side: THREE.DoubleSide,
-              })
-              const mesh = new THREE.Mesh(tubeGeo, mat)
-              this.structureGroup.add(mesh)
-              this.disposables.push(tubeGeo, mat)
-            } else {
-              // Loop → thin tube in chain colour
-              const tubeGeo = new THREE.TubeGeometry(curve, tubularSeg, 0.22, 8, false)
-              const mat = new THREE.MeshStandardMaterial({
-                color: chainCol, roughness: 0.5, metalness: 0.05,
-              })
-              const mesh = new THREE.Mesh(tubeGeo, mat)
-              this.structureGroup.add(mesh)
-              this.disposables.push(tubeGeo, mat)
-            }
-          }
-          i = j
-        }
+        const curve = new THREE.CatmullRomCurve3(seg, false, 'catmullrom', 0.5)
+        const tubularSeg = Math.max(16, seg.length * 8)
+        // Use a medium-thick tube by default — looks good for both helices
+        // and loops.  Colour: helix=red, sheet=amber, loop=chain colour.
+        const ss = anchors[0]?.ss ?? 'L'
+        let radius = 0.8
+        let color = chainCol
+        if (ss === 'H') { radius = 1.0; color = 0xe0566b }
+        else if (ss === 'E') { radius = 0.7; color = 0xf0a830 }
+        else { radius = 0.6; color = chainCol }
+        const tubeGeo = new THREE.TubeGeometry(curve, tubularSeg, radius, 10, false)
+        const mat = new THREE.MeshStandardMaterial({
+          color, roughness: 0.4, metalness: 0.05,
+        })
+        const mesh = new THREE.Mesh(tubeGeo, mat)
+        this.structureGroup.add(mesh)
+        this.disposables.push(tubeGeo, mat)
       }
     }
   }
@@ -744,38 +727,53 @@ export class HoleViewer {
 
   /** Frame the scene to the combined bounding box of structure + surface. */
   fitView() {
+    // Ensure the canvas is sized correctly before framing the scene.
+    this.handleResize()
     this.bbox.makeEmpty()
+    let meshCount = 0
     for (const g of [this.structureGroup, this.surfaceGroup, this.centreLineGroup, this.sphereGroup]) {
       if (!g.visible) continue
       g.updateMatrixWorld(true)
       g.traverse(obj => {
         if (obj instanceof THREE.Mesh) {
+          meshCount++
           const geo = obj.geometry
           if (geo && geo.attributes && geo.attributes.position) {
             geo.computeBoundingBox()
-            const bb = geo.boundingBox!
-            obj.updateMatrixWorld(true)
-            bb.applyMatrix4(obj.matrixWorld)
-            this.bbox.union(bb)
+            const bb = geo.boundingBox
+            if (bb) {
+              obj.updateMatrixWorld(true)
+              bb.applyMatrix4(obj.matrixWorld)
+              this.bbox.union(bb)
+            }
           }
         }
       })
     }
-    if (this.bbox.isEmpty()) return
+    if (this.bbox.isEmpty()) {
+      return
+    }
     const center = new THREE.Vector3()
     this.bbox.getCenter(center)
     const size = new THREE.Vector3()
     this.bbox.getSize(size)
     const maxDim = Math.max(size.x, size.y, size.z, 1)
     const fov = this.camera.fov * Math.PI / 180
-    const dist = (maxDim / 2) / Math.tan(fov / 2) * 1.6
+    const dist = (maxDim / 2) / Math.tan(fov / 2) * 1.4
     this.controls.target.copy(center)
     const dir = new THREE.Vector3(1, 0.6, 1).normalize()
     this.camera.position.copy(center).addScaledVector(dir, dist)
-    this.camera.near = dist / 100
+    this.camera.near = Math.max(0.01, dist / 100)
     this.camera.far = dist * 100
     this.camera.updateProjectionMatrix()
+    // Reset the controls' internal state so it doesn't override our camera
+    // position on the next update() call.
+    const ctrl = this.controls as any
+    if (ctrl.sphericalDelta) ctrl.sphericalDelta.set(0, 0, 0)
+    if (ctrl.panOffset) ctrl.panOffset.set(0, 0, 0)
+    ctrl.scale = 1
     this.controls.update()
+    this.camera.lookAt(this.controls.target)
   }
 
   private clearGroup(group: THREE.Group) {
