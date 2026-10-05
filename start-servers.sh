@@ -1,35 +1,32 @@
 #!/bin/bash
 # Start both the Python HOLE2 service and the Next.js standalone server.
-# Uses setsid to detach from the terminal so processes survive bash session exits.
-#
-# This script is designed for the sandbox environment where "output: standalone"
-# is required by .zscripts/build.sh and .zscripts/start.sh.
+# This is a convenience script for manual startup.
+# The sandbox's .zscripts/dev.sh handles auto-startup on deployment.
 
-cd /home/z/my-project
+cd "$(dirname "$0")"
 
-# 1. Start Python HOLE2 mini-service (port 3001) if not running
+# 1. Start Python HOLE2 service (port 3001)
 if ! pgrep -f "uvicorn main:app" > /dev/null 2>&1; then
-  echo "Starting HOLE2 Python service on port 3001..."
-  setsid bash -c 'cd /home/z/my-project/mini-services/hole2-service && exec python3 -m uvicorn main:app --host 0.0.0.0 --port 3001' > /tmp/hole2-service.log 2>&1 < /dev/null &
-  disown
-  sleep 2
+    echo "Starting HOLE2 Python service on port 3001..."
+    setsid bash -c 'cd mini-services/hole2-service && exec bash start.sh' > /tmp/hole2-service.log 2>&1 < /dev/null &
+    disown
+    sleep 3
 fi
 
-# 2. Build Next.js if .next/standalone doesn't exist
-if [ ! -f .next/standalone/server.js ]; then
-  echo "Building Next.js production bundle (with standalone output)..."
-  NODE_OPTIONS="--max-old-space-size=2048" npx next build 2>&1 | tail -5
-  # Copy static files into the standalone dir (required for serving)
-  cp -r .next/static .next/standalone/.next/ 2>/dev/null
-  cp -r public .next/standalone/ 2>/dev/null
+# 2. Build Next.js if needed
+if [ ! -f ".next/standalone/server.js" ]; then
+    echo "Building Next.js (standalone)..."
+    NODE_OPTIONS="--max-old-space-size=2048" npx next build 2>&1 | tail -5
+    cp -r .next/static .next/standalone/.next/ 2>/dev/null
+    cp -r public .next/standalone/ 2>/dev/null
 fi
 
-# 3. Start Next.js standalone server (port 3000) if not running
+# 3. Start Next.js standalone server (port 3000)
 if ! pgrep -f "standalone/server.js" > /dev/null 2>&1; then
-  echo "Starting Next.js standalone server on port 3000..."
-  setsid bash -c 'cd /home/z/my-project/.next/standalone && PORT=3000 exec node server.js' > /tmp/next-prod.log 2>&1 < /dev/null &
-  disown
-  sleep 5
+    echo "Starting Next.js standalone server on port 3000..."
+    setsid bash -c 'cd .next/standalone && PORT=3000 exec node server.js' > /tmp/next-prod.log 2>&1 < /dev/null &
+    disown
+    sleep 3
 fi
 
 echo "--- Status ---"
