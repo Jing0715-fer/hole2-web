@@ -110,6 +110,12 @@ export class HoleViewer {
   // bounding box of the structure + hole surface combined
   private bbox = new THREE.Box3()
   private axesHelper: THREE.AxesHelper | null = null
+  // hover tooltip element
+  private tooltipEl: HTMLDivElement | null = null
+  // distance measurement state
+  private measureStart: THREE.Vector3 | null = null
+  private measureLine: THREE.Line | null = null
+  private measureLabel: THREE.Sprite | null = null
 
   constructor(container: HTMLElement) {
     this.container = container
@@ -144,6 +150,16 @@ export class HoleViewer {
       this.handleMiddleClick(e)
     })
 
+    // Double-click: zoom to the atom under the cursor
+    this.renderer.domElement.addEventListener('dblclick', (e: MouseEvent) => {
+      this.handleDoubleClick(e)
+    })
+
+    // Mouse hover: show residue/atom info tooltip
+    this.renderer.domElement.addEventListener('pointermove', (e: PointerEvent) => {
+      this.handleHover(e)
+    })
+
     // lighting — 3-point setup
     const amb = new THREE.AmbientLight(0xffffff, 0.55)
     this.scene.add(amb)
@@ -165,6 +181,20 @@ export class HoleViewer {
     // resize handling
     this.resizeObserver = new ResizeObserver(() => this.handleResize())
     this.resizeObserver.observe(container)
+
+    // Create hover tooltip element (hidden by default)
+    this.tooltipEl = document.createElement('div')
+    this.tooltipEl.style.cssText = `
+      position: absolute; pointer-events: none; z-index: 100;
+      background: rgba(15, 23, 42, 0.92); color: #e2e8f0;
+      padding: 6px 10px; border-radius: 6px; font-size: 12px;
+      font-family: monospace; white-space: nowrap;
+      border: 1px solid rgba(148, 163, 184, 0.3);
+      box-shadow: 0 2px 8px rgba(0,0,0,0.3); display: none;
+      line-height: 1.5;
+    `
+    container.style.position = 'relative'
+    container.appendChild(this.tooltipEl)
 
     this.startLoop()
   }
@@ -894,6 +924,105 @@ export class HoleViewer {
   /** Handle middle-click: raycast to find the closest mesh point and
    *  re-center the orbit target to that 3D position. */
   private handleMiddleClick(e: MouseEvent) {
+    const hit = this.raycastFromMouse(e)
+    if (hit) {
+      this.controls.target.set(hit.point.x, hit.point.y, hit.point.z)
+      // Also move camera to maintain the same relative offset (smooth re-center)
+      const offset = new THREE.Vector3().subVectors(this.camera.position, this.controls.target)
+      const dist = offset.length()
+      // Zoom in slightly to focus on the picked point
+      const newDist = Math.min(dist, dist * 0.6)
+      const dir = offset.normalize()
+      this.camera.position.copy(this.controls.target).addScaledVector(dir, newDist)
+    }
+  }
+
+  /** Handle double-click: zoom to the atom under the cursor */
+  private handleDoubleClick(e: MouseEvent) {
+    const hit = this.raycastFromMouse(e)
+    if (hit) {
+      this.controls.target.set(hit.point.x, hit.point.y, hit.point.z)
+      // Move camera closer
+      const offset = new THREE.Vector3().subVectors(this.camera.position, this.controls.target)
+      const dist = offset.length()
+      const newDist = Math.max(5, dist * 0.3)
+      const dir = offset.normalize()
+      this.camera.position.copy(this.controls.target).addScaledVector(dir, newDist)
+      this.controls.update()
+    }
+  }
+
+  /** Handle mouse hover: show residue/atom info in a tooltip */
+  private handleHover(e: PointerEvent) {
+    if (!this.tooltipEl || !this.currentStructure) {
+      if (this.tooltipEl) this.tooltipEl.style.display = 'none'
+      return
+    }
+
+    // Don't show tooltip while dragging (TrackballControls active)
+    if (this.controls && this.controls._isDragging) {
+      this.tooltipEl.style.display = 'none'
+      return
+    }
+
+    const hit = this.raycastFromMouse(e)
+    if (!hit) {
+      this.tooltipEl.style.display = 'none'
+      return
+    }
+
+    // Find the nearest atom to the hit point
+    const s = this.currentStructure
+    let nearestIdx = -1
+    let nearestDist = Infinity
+    for (let i = 0; i < s.atoms.length; i++) {
+      const a = s.atoms[i]
+      const d2 = (a.x - hit.point.x) ** 2 + (a.y - hit.point.y) ** 2 + (a.z - hit.point.z) ** 2
+      if (d2 < nearestDist) {
+        nearestDist = d2
+        nearestIdx = i
+      }
+    }
+
+    if (nearestIdx < 0 || nearestDist > 25) { // > 5 Å away from any atom
+      this.tooltipEl.style.display = 'none'
+      return
+    }
+
+    const atom = s.atoms[nearestIdx]
+    // Find residue info
+    let resName = atom.resName
+    let resSeq = atom.resSeq
+    let chainId = atom.chainId
+    // Format: "ALA 42  Chain A  |  CA (C)  |  xyz"
+    const elementColor = this.getElementColor(atom.element)
+    this.tooltipEl.innerHTML = `
+      <div style="font-weight:600;color:${elementColor}">${atom.name} <span style="opacity:0.6">(${atom.element})</span></div>
+      <div style="opacity:0.8">${resName} ${resSeq} · Chain ${chainId}</div>
+      <div style="opacity:0.5;font-size:11px">${atom.x.toFixed(2)}, ${atom.y.toFixed(2)}, ${atom.z.toFixed(2)} Å</div>
+    `
+    this.tooltipEl.style.display = 'block'
+    const rect = this.container.getBoundingClientRect()
+    // Position tooltip near cursor, offset slightly
+    const x = e.clientX - rect.left + 14
+    const y = e.clientY - rect.top + 14
+    this.tooltipEl.style.left = `${x}px`
+    this.tooltipEl.style.top = `${y}px`
+  }
+
+  /** Get a CSS color string for an element */
+  private getElementColor(element: string): string {
+    const colors: Record<string, string> = {
+      C: '#a8a8a8', N: '#3050f8', O: '#ff0d0d', S: '#ffff30',
+      H: '#ffffff', P: '#ff8000', FE: '#906040', ZN: '#7d80b0',
+      MG: '#8aff00', CA: '#3dff00', CL: '#1ff01f', NA: '#ab5cf2',
+    }
+    return colors[element.toUpperCase()] ?? '#ff80d0'
+  }
+
+  /** Raycast from mouse position to find the closest visible mesh intersection.
+   *  Returns the intersection point + mesh, or null if nothing was hit. */
+  private raycastFromMouse(e: MouseEvent): { point: THREE.Vector3; object: THREE.Object3D } | null {
     const rect = this.renderer.domElement.getBoundingClientRect()
     const ndc = new THREE.Vector2(
       ((e.clientX - rect.left) / rect.width) * 2 - 1,
@@ -902,7 +1031,6 @@ export class HoleViewer {
     const raycaster = new THREE.Raycaster()
     raycaster.setFromCamera(ndc, this.camera)
 
-    // Collect all meshes in visible groups
     const meshes: THREE.Object3D[] = []
     for (const g of [this.structureGroup, this.surfaceGroup, this.centreLineGroup, this.sphereGroup]) {
       if (!g.visible) continue
@@ -910,13 +1038,13 @@ export class HoleViewer {
         if (obj instanceof THREE.Mesh) meshes.push(obj)
       })
     }
-    if (meshes.length === 0) return
+    if (meshes.length === 0) return null
 
     const intersects = raycaster.intersectObjects(meshes, false)
-    if (intersects.length > 0) {
-      const point = intersects[0].point
-      this.controls.target.set(point.x, point.y, point.z)
+    if (intersects.length > 0 && intersects[0].point) {
+      return { point: intersects[0].point, object: intersects[0].object }
     }
+    return null
   }
 
   /** Capture a PNG snapshot of the current canvas. */

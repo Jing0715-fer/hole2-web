@@ -85,6 +85,19 @@ export function ViewerControls({ options, onChange, onCapturePNG }: ViewerContro
           <Camera className="mr-1 size-3.5" /> Capture PNG
         </Button>
 
+        {/* Mouse controls help */}
+        <div className="space-y-1.5 rounded-md border border-border/40 bg-muted/20 p-2.5">
+          <p className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">Mouse controls</p>
+          <div className="space-y-0.5 text-[11px] text-muted-foreground">
+            <div className="flex justify-between"><span>Left drag</span><span className="font-mono">Rotate</span></div>
+            <div className="flex justify-between"><span>Right drag</span><span className="font-mono">Pan</span></div>
+            <div className="flex justify-between"><span>Scroll</span><span className="font-mono">Zoom</span></div>
+            <div className="flex justify-between"><span>Middle click</span><span className="font-mono">Center atom</span></div>
+            <div className="flex justify-between"><span>Double click</span><span className="font-mono">Zoom to atom</span></div>
+            <div className="flex justify-between"><span>Hover</span><span className="font-mono">Residue info</span></div>
+          </div>
+        </div>
+
         {/* Colour legend */}
         <div className="space-y-1.5 rounded-md border border-border/40 bg-muted/20 p-2.5">
           <p className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">Pore-zone legend</p>
