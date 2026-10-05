@@ -148,7 +148,7 @@ export const DEFAULT_PARAMS: RunParams = {
   connolly: false,
   ignore_residues: '',
   sphpdb_name: 'hole_out',
-  dotden: '15',
+  dotden: '20',
   smooth_surface: true,
 }
 

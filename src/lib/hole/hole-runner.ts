@@ -709,7 +709,7 @@ export function runHolePipeline(
   // 5. Run `sph_process` twice — once for the dot surface (.qpt) and once
   //    for the solid surface (.sos).
   const sphPath = path.join(workDir, `${sphpdbName}.sph`)
-  const dotden = Math.max(5, Math.min(30, Math.trunc(params.dotden) || 15))
+  const dotden = Math.max(5, Math.min(30, Math.trunc(params.dotden) || 20))
   const dotQpt = path.join(workDir, 'dotsurface.qpt')
   const solidSos = path.join(workDir, 'solid_surface.sos')
 
@@ -919,7 +919,7 @@ const EXAMPLE_DESCRIPTIONS: Record<string, string> = {
 
 const EXAMPLE_PARAMS: Record<string, Record<string, string | boolean>> = {
   '01_gramicidin_1grm': {
-    endrad: '5.0', ignore_residues: '', shorto: '0', dotden: '15',
+    endrad: '5.0', ignore_residues: '', shorto: '0', dotden: '20',
   },
   '02_choleratoxin_1chb': {
     connolly: true, ignore_residues: 'HOH TIP WAT', shorto: '0', dotden: '5',
@@ -927,7 +927,7 @@ const EXAMPLE_PARAMS: Record<string, Record<string, string | boolean>> = {
   '03_maltoporin_1af6': {
     cvect_x: '0.0', cvect_y: '0.0', cvect_z: '1.0',
     cpoint_x: '-14.285', cpoint_y: '47.809', cpoint_z: '82.707',
-    ignore_residues: 'FRU GLC MG HOH', shorto: '0', dotden: '15',
+    ignore_residues: 'FRU GLC MG HOH', shorto: '0', dotden: '20',
   },
   // TRPM8 9PB6: the pore runs along the C4 symmetry axis (z) through the
   // tetramer centre; endrad must exceed the ~19 Å central cavity so HOLE
@@ -935,7 +935,7 @@ const EXAMPLE_PARAMS: Record<string, Record<string, string | boolean>> = {
   '04_trpm8_9pb6': {
     cvect_x: '0.0', cvect_y: '0.0', cvect_z: '1.0',
     cpoint_x: '209.639', cpoint_y: '209.636', cpoint_z: '202.5',
-    endrad: '22.0', ignore_residues: '', shorto: '0', dotden: '15',
+    endrad: '22.0', ignore_residues: '', shorto: '0', dotden: '20',
   },
 }
 

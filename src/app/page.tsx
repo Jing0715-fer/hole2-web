@@ -126,7 +126,7 @@ export default function Home() {
       } else if (ex.id.includes('gramicidin')) {
         next.endrad = '5.0'
         next.shorto = '0'  // full output so the profile is parsed
-        next.dotden = '15'
+        next.dotden = '20'
       } else if (ex.id.includes('choleratoxin')) {
         next.connolly = true
         next.ignore_residues = 'HOH TIP WAT'
@@ -137,7 +137,7 @@ export default function Home() {
         next.cpoint_x = '-14.285'; next.cpoint_y = '47.809'; next.cpoint_z = '82.707'
         next.ignore_residues = 'FRU GLC MG HOH'
         next.shorto = '0'
-        next.dotden = '15'
+        next.dotden = '20'
       }
       setParams(next)
       toast.success(`Loaded ${pdb} (${(blob.size / 1024 / 1024).toFixed(1)} MB)`)
