@@ -61,7 +61,7 @@ export function Viewer3D({ pdbText, pdbName, spheres, surface, centreline, optio
     const initViewer = () => {
       if (cancelled || !containerRef.current) return
       const w = window as any
-      if (!w.THREE) {
+      if (!w.THREE || !w.THREE.OrbitControls) {
         // Retry in 100ms until three.js is loaded. Give up (with a visible
         // error) after ~30 s so the user is never left staring at a black box.
         if (!initViewer.elapsed) initViewer.elapsed = 0

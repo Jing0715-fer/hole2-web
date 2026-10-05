@@ -12,202 +12,46 @@
  * OOM crashes in the sandbox's 4 GB cgroup.
  */
 
-// THREE is loaded from a CDN script tag (see layout.tsx). We access it via
-// a getter function so the async CDN script can finish loading after this
-// module is first imported. The Viewer3D component waits for window.THREE
-// before constructing HoleViewer, so by the time any THREE API is called,
-// the library is ready.
+// THREE + OrbitControls are loaded from CDN script tags (see layout.tsx).
+// We access them via a Proxy at call time so the async CDN scripts can
+// finish loading after this module is first imported.
 function getTHREE(): any {
   if (typeof window === 'undefined') throw new Error('window not available (SSR)')
   const T = (window as any).THREE
   if (!T) throw new Error('three.js CDN script not loaded yet')
   return T
 }
-// THREE behaves like the real three.js namespace — every property access
-// is forwarded to window.THREE at call time.
 const THREE: any = new Proxy({} as any, {
   get(_t, prop) { return getTHREE()[prop] },
 })
 
-/**
- * Orbit controls with proper direction, no pitch clamp, and atom-pick support.
- *
- * Issues fixed vs the previous version:
- * 1. Rotation direction: was inverted (dragging right rotated left).
- *    Now dragging right → yaw increases (scene rotates right), dragging up →
- *    pitch increases (scene tilts up).  Natural "grab and drag" feel.
- * 2. Pitch clamp: was clamped to [-PI/2+0.01, PI/2-0.01], preventing
- *    looking from directly above/below.  Now unclamped — full 360° vertical.
- *    The yaw/pitch system avoids gimbal lock naturally because we never
- *    convert to/from spherical coordinates.
- * 3. Middle-click: picks an atom under the cursor (via raycaster) and
- *    re-centers the orbit target to that atom's position.
- */
-class SimpleOrbitControls {
-  private camera: any
-  private domElement: HTMLElement
-  private target = new THREE.Vector3(0, 0, 0)
-  private distance = 60
-  private yaw = 0.6    // horizontal angle (radians)
-  private pitch = 0.4   // vertical angle (radians, unlimited)
-  private deltaYaw = 0
-  private deltaPitch = 0
-  private scale = 1
-  private panOffset = new THREE.Vector3()
-  enableDamping = true
-  dampingFactor = 0.12
-  private rotateStart = { x: 0, y: 0 }
-  private panStart = { x: 0, y: 0 }
-  private state: 'none' | 'rotate' | 'pan' = 'none'
-  private onPickCallback: ((point: { x: number, y: number, z: number }) => void) | null = null
-
-  constructor(camera: any, domElement: HTMLElement) {
-    this.camera = camera
-    this.domElement = domElement
-    this.update()
-
-    domElement.addEventListener('pointerdown', this.onPointerDown)
-    domElement.addEventListener('wheel', this.onWheel, { passive: false })
-    domElement.addEventListener('contextmenu', (e: Event) => e.preventDefault())
-  }
-
-  /** Set a callback for middle-click atom picking. */
-  setPickCallback(cb: (point: { x: number, y: number, z: number }) => void) {
-    this.onPickCallback = cb
-  }
-
-  /** Set the orbit target to a specific 3D point (e.g. a picked atom). */
-  setTarget(x: number, y: number, z: number) {
-    this.target.set(x, y, z)
-  }
-
-  private onPointerDown = (e: PointerEvent) => {
-    if (e.button === 0) this.state = 'rotate'
-    else if (e.button === 2) this.state = 'pan'
-    else if (e.button === 1) {
-      // Middle click: atom pick (don't start pan/rotate)
-      // The pick logic is handled by the HoleViewer class via a callback
-      this.state = 'none'
-      return
-    }
-    if (this.state === 'rotate') {
-      this.rotateStart = { x: e.clientX, y: e.clientY }
-    } else {
-      this.panStart = { x: e.clientX, y: e.clientY }
-    }
-    window.addEventListener('pointermove', this.onPointerMove)
-    window.addEventListener('pointerup', this.onPointerUp)
-  }
-
-  private onPointerMove = (e: PointerEvent) => {
-    if (this.state === 'rotate') {
-      const dx = e.clientX - this.rotateStart.x
-      const dy = e.clientY - this.rotateStart.y
-      // Natural direction: drag right → scene rotates right (yaw increases)
-      // drag up → camera tilts up (pitch increases)
-      this.deltaYaw += dx * 0.006
-      this.deltaPitch += dy * 0.006
-      this.rotateStart = { x: e.clientX, y: e.clientY }
-    } else if (this.state === 'pan') {
-      const dx = e.clientX - this.panStart.x
-      const dy = e.clientY - this.panStart.y
-      this.pan(dx, dy)
-      this.panStart = { x: e.clientX, y: e.clientY }
-    }
-  }
-
-  private onPointerUp = () => {
-    this.state = 'none'
-    window.removeEventListener('pointermove', this.onPointerMove)
-    window.removeEventListener('pointerup', this.onPointerUp)
-  }
-
-  private onWheel = (e: WheelEvent) => {
-    e.preventDefault()
-    if (e.deltaY < 0) this.scale *= 0.9
-    else this.scale /= 0.9
-  }
-
-  private pan(dx: number, dy: number) {
-    const el = this.domElement as HTMLElement
-    const targetDistance = this.distance * Math.tan((this.camera.fov / 2) * Math.PI / 180)
-    const panX = new THREE.Vector3()
-    panX.setFromMatrixColumn(this.camera.matrix, 0)
-    panX.multiplyScalar(-2 * dx * targetDistance / el.clientHeight)
-    const panY = new THREE.Vector3()
-    panY.setFromMatrixColumn(this.camera.matrix, 1)
-    panY.multiplyScalar(2 * dy * targetDistance / el.clientHeight)
-    this.panOffset.add(panX).add(panY)
-  }
-
-  update() {
-    // Apply accumulated deltas with damping
-    if (this.enableDamping) {
-      this.yaw += this.deltaYaw * this.dampingFactor
-      this.pitch += this.deltaPitch * this.dampingFactor
-    } else {
-      this.yaw += this.deltaYaw
-      this.pitch += this.deltaPitch
-    }
-
-    // NO pitch clamping — allow full 360° vertical rotation.
-    // The yaw/pitch system does not suffer from gimbal lock because
-    // we never convert to/from spherical coordinates.
-
-    // Apply zoom
-    this.distance *= this.scale
-    this.distance = Math.max(0.1, this.distance)
-
-    // Apply pan
-    this.target.add(this.panOffset)
-
-    // Compute camera position from yaw/pitch/distance (Euler angles)
-    // Using cos(pitch) for the horizontal radius and sin(pitch) for height.
-    // This works for any pitch value (even > PI/2) because cos/sin are
-    // periodic and the camera simply orbits around the target.
-    const cosPitch = Math.cos(this.pitch)
-    const sinPitch = Math.sin(this.pitch)
-    const x = this.distance * cosPitch * Math.sin(this.yaw)
-    const y = this.distance * sinPitch
-    const z = this.distance * cosPitch * Math.cos(this.yaw)
-
-    this.camera.position.set(
-      this.target.x + x,
-      this.target.y + y,
-      this.target.z + z
-    )
-
-    // When pitch goes past PI/2 or -PI/2, the camera is below or above
-    // the target. The up vector needs to flip to keep the view stable.
-    // We detect this when cos(pitch) changes sign.
-    if (cosPitch < 0) {
-      this.camera.up.set(0, -1, 0)
-    } else {
-      this.camera.up.set(0, 1, 0)
-    }
-
-    this.camera.lookAt(this.target)
-
-    // Damp the deltas for next frame
-    if (this.enableDamping) {
-      this.deltaYaw *= (1 - this.dampingFactor)
-      this.deltaPitch *= (1 - this.dampingFactor)
-      this.panOffset.multiplyScalar(1 - this.dampingFactor)
-    } else {
-      this.deltaYaw = 0
-      this.deltaPitch = 0
-      this.panOffset.set(0, 0, 0)
-    }
-    this.scale = 1
-  }
-
-  dispose() {
-    this.domElement.removeEventListener('pointerdown', this.onPointerDown)
-    this.domElement.removeEventListener('wheel', this.onWheel)
-    window.removeEventListener('pointermove', this.onPointerMove)
-    window.removeEventListener('pointerup', this.onPointerUp)
-  }
+/** Create the official THREE.OrbitControls (from CDN). */
+function createOrbitControls(camera: any, domElement: HTMLElement): any {
+  const T = getTHREE()
+  if (!T.OrbitControls) throw new Error('OrbitControls not loaded from CDN')
+  return new T.OrbitControls(camera, domElement)
 }
+
+/** Wait for both three.js and OrbitControls CDN scripts to load. */
+function waitForTHREE(timeout = 10000): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const start = Date.now()
+    const check = () => {
+      const T = typeof window !== 'undefined' ? (window as any).THREE : undefined
+      if (T && T.OrbitControls) {
+        resolve()
+      } else if (Date.now() - start > timeout) {
+        reject(new Error('Timeout waiting for three.js + OrbitControls CDN'))
+      } else {
+        setTimeout(check, 50)
+      }
+    }
+    check()
+  })
+}
+
+// (SimpleOrbitControls removed — now using the official THREE.OrbitControls
+//  loaded from CDN via createOrbitControls() above.)
 
 import {
   parsePDB, parseStructure, computeBonds, elementInfo, isProtein, isNucleic, isWater,
@@ -239,7 +83,7 @@ export class HoleViewer {
   private renderer: THREE.WebGLRenderer
   private scene: THREE.Scene
   private camera: THREE.PerspectiveCamera
-  private controls: SimpleOrbitControls
+  private controls: any // THREE.OrbitControls
   private rafId: number | null = null
   private resizeObserver: ResizeObserver | null = null
   private container: HTMLElement
@@ -286,9 +130,9 @@ export class HoleViewer {
     this.camera = new THREE.PerspectiveCamera(45, w / h, 0.1, 1000)
     this.camera.position.set(0, 0, 60)
 
-    this.controls = new SimpleOrbitControls(this.camera, this.renderer.domElement)
+    this.controls = createOrbitControls(this.camera, this.renderer.domElement)
     this.controls.enableDamping = true
-    this.controls.dampingFactor = 0.12
+    this.controls.dampingFactor = 0.08
 
     // Middle-click atom picking: raycaster finds the closest mesh under
     // the cursor and re-centers the orbit target to that point.
@@ -1004,18 +848,11 @@ export class HoleViewer {
       this.scene.fog.near = dist * 0.9
       this.scene.fog.far = dist * 3.0
     }
-    // Set the controls' yaw/pitch/distance to match the desired camera position.
-    // The camera direction is (0.3, 0.2, 1) normalized — convert to yaw/pitch:
+    // Position the camera and let OrbitControls handle the rest.
+    // The official OrbitControls API: set target + camera position, then update.
     const dir = new THREE.Vector3(0.3, 0.2, 1).normalize()
-    const ctrl = this.controls as any
-    ctrl.target.copy(center)
-    ctrl.distance = dist
-    ctrl.yaw = Math.atan2(dir.x, dir.z)
-    ctrl.pitch = Math.asin(dir.y)
-    ctrl.deltaYaw = 0
-    ctrl.deltaPitch = 0
-    ctrl.panOffset.set(0, 0, 0)
-    ctrl.scale = 1
+    this.controls.target.copy(center)
+    this.camera.position.copy(center).addScaledVector(dir, dist)
     this.camera.near = Math.max(0.01, dist / 100)
     this.camera.far = dist * 100
     this.camera.updateProjectionMatrix()
@@ -1075,7 +912,7 @@ export class HoleViewer {
     const intersects = raycaster.intersectObjects(meshes, false)
     if (intersects.length > 0) {
       const point = intersects[0].point
-      this.controls.setTarget(point.x, point.y, point.z)
+      this.controls.target.set(point.x, point.y, point.z)
     }
   }
 

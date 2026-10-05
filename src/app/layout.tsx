@@ -43,10 +43,17 @@ export default function RootLayout({
   return (
     <html lang="en" suppressHydrationWarning>
       <head>
-        {/* Load three.js from CDN so Turbopack/webpack doesn't need to compile
-            the 23 MB library — dramatically reduces dev-server memory. */}
+        {/* Load three.js + OrbitControls from CDN — avoids bundling the 23 MB
+            npm package (which causes Turbopack OOM crashes in the sandbox). */}
         <script
           src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"
+          async
+        ></script>
+        {/* OrbitControls from the three.js examples — the official, well-tested
+            implementation with proper gimbal-lock handling, damping, and
+            unlimited rotation. */}
+        <script
+          src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"
           async
         ></script>
       </head>
