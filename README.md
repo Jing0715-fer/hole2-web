@@ -58,7 +58,7 @@ Browser ─── Caddy :81 ─── Next.js :3000 (this repo, src/)
 ### Prerequisites
 - Node.js 18+ and [bun](https://bun.sh)
 - Python 3.10+ (for the mini-service)
-- Internet access on first run (to download the conda-forge hole2 package + three.js from CDN)
+- Internet access on first run (three.js loaded from CDN; Python deps auto-installed via uv)
 
 ### Quick start (recommended)
 ```bash
@@ -66,16 +66,13 @@ Browser ─── Caddy :81 ─── Next.js :3000 (this repo, src/)
 git clone https://github.com/Jing0715-fer/hole2-web.git
 cd hole2-web
 
-# 2. Install the HOLE2 conda-forge env (idempotent — only runs once)
-bash mini-services/hole2-service/bootstrap.sh
-
-# 3. Install frontend deps
+# 2. Install frontend deps
 bun install
 
-# 4. Build the production bundle (creates .next/standalone/)
+# 3. Build the production bundle (creates .next/standalone/)
 bun run build
 
-# 5. Start both servers (Python + Next.js standalone)
+# 4. Start both servers (Python HOLE2 service + Next.js)
 bash start-servers.sh
 ```
 
