@@ -118,6 +118,7 @@ async function proxy(req: NextRequest): Promise<Response> {
   headers.delete('expect')
 
   try {
+    const t0 = Date.now()
     const hasBody = req.method !== 'GET' && req.method !== 'HEAD'
     // Buffer the request body (up to the upload cap) rather than streaming it.
     // Streaming with duplex:'half' proved unreliable for multi-MB multipart
@@ -132,20 +133,25 @@ async function proxy(req: NextRequest): Promise<Response> {
         )
       }
     }
+    const tBody = Date.now()
     const upstream = await fetch(target, {
       method: req.method,
       headers,
       ...(hasBody ? { body } : {}),
       signal: AbortSignal.timeout(10 * 60 * 1000), // HOLE runs can be slow
     })
+    const tFetch = Date.now()
+    const respBody = await upstream.arrayBuffer()
+    const tResp = Date.now()
+    console.log(`[hole2-proxy] ${req.method} ${rest}: body=${tBody - t0}ms fetch=${tFetch - tBody}ms resp=${tResp - tFetch}ms (${body?.byteLength ?? 0}B up / ${respBody.byteLength}B down)`)
 
     const respHeaders = new Headers()
-    const passThrough = ['content-type', 'content-disposition', 'content-length']
+    const passThrough = ['content-type', 'content-disposition']
     for (const h of passThrough) {
       const v = upstream.headers.get(h)
       if (v) respHeaders.set(h, v)
     }
-    return new Response(upstream.body, {
+    return new Response(respBody, {
       status: upstream.status,
       headers: respHeaders,
     })

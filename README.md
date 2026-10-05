@@ -63,25 +63,55 @@ Browser ─── Next.js :3000 (this repo, src/)
 ### Prerequisites
 - Node.js 18+ and [bun](https://bun.sh)
 - Python 3.10+ (for the mini-service)
-- Internet access on first run (to download the conda-forge hole2 package)
+- **HOLE2 binaries are bundled in `vendor/hole2/`** (pre-compiled Linux x86_64 ELF executables + the 5 `.rad` files + 3 example structures) — no conda/micromamba install is needed on Linux x86_64 with `libgfortran.so.5`. On other platforms run `bash mini-services/hole2-service/bootstrap.sh` once to create the conda-forge fallback env.
+- Internet access on first page load (three.js loads from CDN)
 
-### Setup
+### Quick start (recommended)
 ```bash
-# 1. Install the HOLE2 conda-forge env (idempotent — only runs once)
+# 1. Clone the repo
+git clone https://github.com/Jing0715-fer/hole2-web.git
+cd hole2-web
+
+# 2. Install the HOLE2 conda-forge env (idempotent — only runs once)
 bash mini-services/hole2-service/bootstrap.sh
 
-# 2. Install frontend deps
+# 3. Install frontend deps
 bun install
 
-# 3. Start the Next.js dev server on port 3000
+# 4. Start the Next.js dev server on port 3000
 bun run dev
 # The /api/hole/* route handler automatically spawns the Python HOLE2
 # service on 127.0.0.1:3001 on the first API call (and restarts it if it
-# dies). To run it manually instead:
+# dies) — no manual service start needed. To run it manually instead:
 #   cd mini-services/hole2-service && python3 -m uvicorn main:app --host 127.0.0.1 --port 3001
+#
+# Production alternative (standalone server + both services):
+#   bun run build && bash start-servers.sh
 ```
 
-Open http://localhost:81/ (via the Caddy gateway) or http://localhost:3000/ (direct) in your browser.
+Then open `http://localhost:3000/` in your browser.
+
+### Manual start (alternative)
+```bash
+# Terminal 1: Start the Python HOLE2 mini-service on port 3001
+cd mini-services/hole2-service
+python3 -m uvicorn main:app --host 0.0.0.0 --port 3001
+
+# Terminal 2: Build + start the Next.js standalone server on port 3000
+cd /path/to/hole2-web
+bun run build
+bun run start   # runs: cd .next/standalone && PORT=3000 node server.js
+```
+
+> **Note:** `next dev` (development mode) uses Turbopack which requires 2+ GB RAM
+> and may crash in memory-constrained environments. Use `bun run start`
+> (production mode, ~200 MB RAM) for stable operation.
+
+### three.js loading
+three.js is loaded from the [cdnjs](https://cdnjs.com) CDN via a `<script>` tag
+in `src/app/layout.tsx` (not bundled via npm). This keeps the build lightweight
+and avoids Turbopack memory issues. The viewer accesses it via `window.THREE`
+through a Proxy in `src/lib/hole/viewer.ts`.
 
 ### Bundled examples
 | Example | Structure | Pore type | Key params |

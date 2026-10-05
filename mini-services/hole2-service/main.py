@@ -63,23 +63,44 @@ from fastapi.responses import FileResponse, JSONResponse
 # Configuration
 # ---------------------------------------------------------------------------
 
-# The micromamba env that holds the conda-forge hole2 binaries.  It is created
-# lazily on first use (or by the bootstrap script) and then re-used.
+# HOLE2 binaries are BUNDLED in the project's vendor/hole2/ directory.
+# No conda/micromamba installation is needed — the binaries are pre-compiled
+# ELF executables that work with the system's libgfortran.so.5.
+#
+# The vendor/ directory contains:
+#   vendor/hole2/bin/hole, sph_process, sos_triangle, qpt_conv  (executables)
+#   vendor/hole2/rad/*.rad  (5 vdw radius files)
+#   vendor/hole2/examples/  (3 example PDB structures)
+#
+# Fallback: if the bundled binaries don't exist (e.g. during development on a
+# different platform), try the conda env at /tmp/mamba-root/envs/hole2/.
+
+_SERVICE_DIR = Path(__file__).parent.resolve()
+_PROJECT_ROOT = _SERVICE_DIR.parent.parent  # mini-services/hole2-service → project root
+
+# Bundled HOLE2 binaries (primary)
+VENDOR_HOLE2 = _PROJECT_ROOT / "vendor" / "hole2"
+VENDOR_BIN = VENDOR_HOLE2 / "bin"
+VENDOR_RAD = VENDOR_HOLE2 / "rad"
+VENDOR_EXAMPLES = VENDOR_HOLE2 / "examples"
+
+# Conda env fallback (for development)
 MAMBA_ROOT = os.environ.get("MAMBA_ROOT_PREFIX", "/tmp/mamba-root")
 HOLE2_ENV_NAME = os.environ.get("HOLE2_ENV_NAME", "hole2")
-MICROMAMBA_BIN = os.environ.get("MICROMAMBA_BIN", "/tmp/mm/bin/micromamba")
+CONDA_PREFIX = f"{MAMBA_ROOT}/envs/{HOLE2_ENV_NAME}"
 
 # A persistent jobs directory so downloads keep working across requests.
 JOBS_DIR = Path(os.environ.get("HOLE2_JOBS_DIR", "/tmp/hole2-jobs"))
 JOBS_DIR.mkdir(parents=True, exist_ok=True)
 
-# Bundled rad files + example PDBs ship with the conda env, but we expose
-# the ones from the cloned hole2 repo (more discoverable) as a fallback.
-HOLE2_REPO_RAD = Path("/tmp/hole2/rad")
-HOLE2_REPO_EXAMPLES = Path("/tmp/hole2/examples")
-# Repo-local examples (shipped with this repository) take priority over the
-# cloned osmart/hole2 examples so the app is self-contained.
-LOCAL_EXAMPLES = Path(__file__).resolve().parent / "examples"
+# Rad files + examples: prefer repo-local examples + the bundled vendor files,
+# then the conda env as a final fallback.
+HOLE2_REPO_RAD = VENDOR_RAD
+HOLE2_REPO_EXAMPLES = VENDOR_EXAMPLES
+# Repo-local examples (shipped with this repository) — the TRPM8 9PB6 demo
+# with its recommended parameters. _example_dirs() merges these with the
+# vendor examples so all four demos show up.
+LOCAL_EXAMPLES = _SERVICE_DIR / "examples"
 
 # ---------------------------------------------------------------------------
 # Hardening constants
@@ -96,31 +117,47 @@ MAX_CONCURRENT_RUNS = 2               # Fortran pipelines running at once
 
 
 # ---------------------------------------------------------------------------
-# Environment management
+# Binary resolution
 # ---------------------------------------------------------------------------
 
 def env_bin(name: str) -> str:
-    """Return the absolute path to a binary inside the hole2 micromamba env."""
-    return f"{MAMBA_ROOT}/envs/{HOLE2_ENV_NAME}/bin/{name}"
+    """Return the path to a HOLE2 binary.
+    
+    Tries the bundled vendor/ directory first, then the conda env.
+    """
+    bundled = str(VENDOR_BIN / name)
+    if os.path.isfile(bundled) and os.access(bundled, os.X_OK):
+        return bundled
+    # Fallback to conda env
+    return f"{CONDA_PREFIX}/bin/{name}"
 
 
 def env_prefix() -> str:
-    return f"{MAMBA_ROOT}/envs/{HOLE2_ENV_NAME}"
+    """Return the prefix for finding share/ data (rad files etc.)."""
+    if VENDOR_HOLE2.exists():
+        return str(VENDOR_HOLE2)
+    return CONDA_PREFIX
 
 
 def env_exists() -> bool:
-    return Path(env_prefix()).exists() and Path(env_bin("hole")).exists()
+    """Check if HOLE2 binaries are available (either bundled or conda)."""
+    return os.path.isfile(env_bin("hole")) and os.access(env_bin("hole"), os.X_OK)
 
 
 def run_in_env(args: list[str], *, cwd: str, input_text: str | None = None,
                timeout: int = 300) -> tuple[int, str, str]:
-    """Run a command inside the hole2 conda env (PATH + datadir prepended)."""
-    prefix = env_prefix()
+    """Run a HOLE2 command.
+    
+    With bundled binaries, we just need to set PATH so the binaries can find
+    each other. The system's libgfortran.so.5 provides the Fortran runtime.
+    """
     env = os.environ.copy()
-    env["PATH"] = f"{prefix}/bin:{env.get('PATH', '')}"
-    env["CONDA_PREFIX"] = prefix
-    # hole looks for share/hole2/rad relative to its bin/../share
-    env["HOLE2_DATA"] = f"{prefix}/share/hole2"
+    # Prepend the bin directory to PATH
+    bin_dir = str(VENDOR_BIN) if VENDOR_BIN.exists() else f"{CONDA_PREFIX}/bin"
+    env["PATH"] = f"{bin_dir}:{env.get('PATH', '')}"
+    # For conda env fallback, set CONDA_PREFIX
+    if not VENDOR_HOLE2.exists():
+        env["CONDA_PREFIX"] = CONDA_PREFIX
 
     proc = subprocess.run(
         args,
@@ -594,7 +631,10 @@ async def run_hole_pipeline(pdb_bytes: bytes, pdb_name: str,
         rad_path.write_bytes(custom_rad)
     else:
         rad_set = params.get("radius_set", "simple")
-        bundled = Path(env_prefix()) / "share/hole2/rad" / f"{rad_set}.rad"
+        # Try bundled rad dir (vendor/hole2/rad/), then conda env's share dir
+        bundled = VENDOR_RAD / f"{rad_set}.rad"
+        if not bundled.exists():
+            bundled = Path(CONDA_PREFIX) / "share/hole2/rad" / f"{rad_set}.rad"
         if not bundled.exists() and HOLE2_REPO_RAD.exists():
             bundled = HOLE2_REPO_RAD / f"{rad_set}.rad"
         if not bundled.exists():
@@ -744,7 +784,7 @@ async def run_hole_pipeline(pdb_bytes: bytes, pdb_name: str,
         sos_cmd = [env_bin("sos_triangle")]
         if use_smooth:
             sos_cmd.append("-s")
-        env = {**os.environ, "PATH": f"{env_prefix()}/bin:{os.environ.get('PATH','')}"}
+        env = {**os.environ, "PATH": f"{str(VENDOR_BIN) if VENDOR_BIN.exists() else CONDA_PREFIX + '/bin'}:{os.environ.get('PATH','')}"}
         proc = await asyncio.to_thread(
             lambda: subprocess.run(
                 sos_cmd, input=sos_content, capture_output=True,
@@ -805,6 +845,10 @@ async def run_hole_pipeline(pdb_bytes: bytes, pdb_name: str,
     # 4) qpt_conv → .vmd_plot for the dot surface (best-effort — qpt_conv is
     #    an interactive program; we feed the prompts via stdin).  We only do
     #    this if the user explicitly asks for the dot-surface vmd_plot.
+    # NOTE: the bundled vendor qpt_conv build hangs on this prompt feed (the
+    # conda-forge build exits cleanly with it), so the timeout is kept SHORT
+    # — a working qpt_conv finishes in well under a second; a hung one is
+    # killed after 5 s instead of stalling every run for a full minute.
     dot_vmd_path = work_dir / "dotsurface.vmd_plot"
     try:
         if dot_qpt.exists():
@@ -813,8 +857,8 @@ async def run_hole_pipeline(pdb_bytes: bytes, pdb_name: str,
                 lambda: subprocess.run(
                     [env_bin("qpt_conv")],
                     input=feed, capture_output=True, cwd=str(work_dir),
-                    env={**os.environ, "PATH": f"{env_prefix()}/bin:{os.environ.get('PATH','')}"},
-                    timeout=60,
+                    env={**os.environ, "PATH": f"{str(VENDOR_BIN) if VENDOR_BIN.exists() else CONDA_PREFIX + '/bin'}:{os.environ.get('PATH','')}"},
+                    timeout=5,
                 )
             )
             # qpt_conv writes the output file (despite its chatty stdout)
@@ -942,16 +986,48 @@ async def _start_background_tasks() -> None:
 # Early rejection of oversized upload bodies (before the full body is read
 # into RAM) based on the Content-Length header. Belt-and-braces with the
 # post-read check in /api/run.
-@app.middleware("http")
-async def _reject_oversized_bodies(request, call_next):
-    cl = request.headers.get("content-length")
-    if cl and cl.isdigit() and int(cl) > MAX_UPLOAD_BYTES + MAX_RAD_BYTES + 1024 * 1024:
-        return JSONResponse(
-            {"detail": f"Request body too large (>{(MAX_UPLOAD_BYTES + MAX_RAD_BYTES) // (1024*1024)} MB). "
-                       "Upload a smaller structure or strip solvent/hydrogens."},
-            status_code=413,
-        )
-    return await call_next(request)
+class _RejectOversizedBodies:
+    """Pure-ASGI middleware: reject oversized upload bodies early (before
+    the body is read) based on the Content-Length header.
+
+    Implemented as raw ASGI rather than ``@app.middleware("http")`` because
+    Starlette's BaseHTTPMiddleware wraps the response stream, which —
+    verified empirically — delays POST responses by ~60 s for Node/undici
+    clients (curl is unaffected). A pure-ASGI middleware passes the response
+    through untouched.
+    """
+
+    MAX_COMBINED = MAX_UPLOAD_BYTES + MAX_RAD_BYTES + 1024 * 1024
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        cl: str | None = None
+        for k, v in scope.get("headers", []):
+            if k.lower() == b"content-length":
+                cl = v.decode("latin-1")
+                break
+        if cl and cl.isdigit() and int(cl) > self.MAX_COMBINED:
+            import json as _json
+            body = _json.dumps({
+                "detail": f"Request body too large (>{self.MAX_COMBINED // (1024*1024)} MB). "
+                          "Upload a smaller structure or strip solvent/hydrogens.",
+            }).encode()
+            await send({
+                "type": "http.response.start",
+                "status": 413,
+                "headers": [(b"content-type", b"application/json")],
+            })
+            await send({"type": "http.response.body", "body": body})
+            return
+        await self.app(scope, receive, send)
+
+    def __init__(self, app):
+        self.app = app
+
+
+app.add_middleware(_RejectOversizedBodies)
 
 
 @app.get("/api/health")
@@ -1105,12 +1181,19 @@ async def run_hole(
     if ignore_residues and not IGNORE_RE.fullmatch(ignore_residues):
         raise HTTPException(status_code=400,
             detail="ignore_residues may only contain letters, digits, spaces, dashes")
-    allowed_rad_sets = {p.stem for p in
-                        (Path(env_prefix()) / "share/hole2/rad").glob("*.rad")}
-    if not allowed_rad_sets and HOLE2_REPO_RAD.exists():
-        allowed_rad_sets = {p.stem for p in HOLE2_REPO_RAD.glob("*.rad")}
+    # Allowed radius sets: bundled vendor dir first, then the conda env's
+    # share dir, then any fallback clone. (env_prefix() points at the vendor
+    # root in bundled mode, where the layout is vendor/hole2/rad — not
+    # share/hole2/rad — so resolve explicitly.)
+    _rad_dirs = [VENDOR_RAD,
+                 Path(CONDA_PREFIX) / "share/hole2/rad",
+                 Path(env_prefix()) / "share/hole2/rad"]
+    allowed_rad_sets: set[str] = set()
+    for _rd in _rad_dirs:
+        if _rd.is_dir():
+            allowed_rad_sets |= {p.stem for p in _rd.glob("*.rad")}
     has_custom_rad = radius_file is not None and (radius_file.filename or "") != ""
-    if not has_custom_rad and radius_set not in allowed_rad_sets:
+    if not has_custom_rad and allowed_rad_sets and radius_set not in allowed_rad_sets:
         raise HTTPException(status_code=400,
             detail=f"Unknown radius set '{radius_set}'. Allowed: {', '.join(sorted(allowed_rad_sets))}")
 
@@ -1324,7 +1407,8 @@ async def download_job_zip(job_id: str):
 async def rad_sets_with_desc():
     """List bundled vdw radius sets with descriptions to help the user choose."""
     names: list[str] = []
-    rad_dir = Path(env_prefix()) / "share/hole2/rad"
+    # Try bundled rad dir (vendor/hole2/rad/), then conda env
+    rad_dir = VENDOR_RAD if VENDOR_RAD.exists() else Path(CONDA_PREFIX) / "share/hole2/rad"
     if rad_dir.exists():
         names = sorted(p.stem for p in rad_dir.glob("*.rad"))
     if not names and HOLE2_REPO_RAD.exists():

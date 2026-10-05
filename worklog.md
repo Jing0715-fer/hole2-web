@@ -312,3 +312,28 @@ Stage Summary:
 - Architecture: Next.js route-handler proxy (/api/hole/*) spawns + supervises the Python service as a child of the web server — immune to the sandbox's background-process reaping and to gateway 502s; frontend no longer uses XTransformPort.
 - Fixed: 1×P0 + 5×P1 frontend, 6×P1 + 8×P2 backend, plus the fitView/fog rendering bugs found only by pixel-level E2E on the large un-centered structure.
 - All E2E green: gramicidin regression, TRPM8 success path, TRPM8 failure-path UX, mobile responsiveness, lint clean.
+
+---
+Task ID: 7 (continued — merge resolution + qpt_conv root cause)
+Agent: main
+Task: Merge the parallel remote session's vendor-bundled-binaries work; chase a 61-second per-run latency regression
+
+Work Log:
+- Push was rejected: the remote had 5 new commits from a parallel session (vendor/hole2 bundled binaries, auto-start scripts, README clone instructions, standalone-config revert).
+- Merged FETCH_HEAD; resolved conflicts in main.py (kept their vendor-resolution + my hardening/9pb6 code; fixed my rad-allowlist lookup to search VENDOR_RAD first since env_prefix() now returns the vendor root whose layout is vendor/hole2/rad, not share/hole2/rad) and README.md (kept their clone-first setup + my proxy auto-spawn note).
+- Post-merge regression hunt: every /api/run took exactly 61 s through the proxy (pre-merge: ~1 s). Systematic isolation:
+  * Byte-level TCP proxy logging: request arrives immediately, FIRST response byte at 62 s → server-side, not transport.
+  * Job-dir mtimes: all 7 binaries complete in <1 s → not the Fortran pipeline.
+  * Node fetch vs curl to the service directly: Node also 61 s → not Next.js.
+  * Same main.py from a different directory (conda binaries): 978 ms → not my code.
+  * Same main.py from my-project (vendor binaries): 61 s → vendor-binary dependent.
+  * Standalone timing of every vendor binary from Python: all <50 ms → not the binaries' compute.
+  * faulthandler.dump_traceback_later stack sampling caught the smoking gun: subprocess._communicate blocked in the qpt_conv lambda at main.py:853.
+  * Direct A/B: vendor qpt_conv fed "D\n<file>\n<file>\n1\n" HANGS (killed by timeout); conda-forge qpt_conv with the same feed exits "normal completion". The bundled build differs and loops on the prompt feed.
+- Fix: qpt_conv stage timeout 60 s → 5 s (it completes in <1 s when the build behaves; the stage is best-effort — the dotsurface.vmd_plot is simply absent for the vendor build).
+- Result: gramicidin 6.1 s (was 61 s), 9PB6 with the recommended params 6.8 s end-to-end (was impossible/60 s+), results byte-identical (min R 1.198 A / 2.112 A).
+
+Stage Summary:
+- Remote merge complete: vendor binaries + my fixes coexist; rad-set resolution handles all three layouts (vendor, conda share, repo-local).
+- The 61 s latency root cause was the vendor qpt_conv build hanging on the interactive prompt feed — now capped at 5 s.
+- Final verified state: all E2E green and fast (TRPM8 one-click run finishes in ~10 s in the browser, 3D render pixel-verified).
