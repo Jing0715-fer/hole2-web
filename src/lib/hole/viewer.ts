@@ -130,9 +130,22 @@ export class HoleViewer {
     this.camera = new THREE.PerspectiveCamera(45, w / h, 0.1, 1000)
     this.camera.position.set(0, 0, 60)
 
+    // Patch Spherical.makeSafe to allow full 360° rotation (no pole clamp).
+    // This must be done BEFORE creating OrbitControls.
+    patchSphericalMakeSafe()
+
     this.controls = createOrbitControls(this.camera, this.renderer.domElement)
     this.controls.enableDamping = true
     this.controls.dampingFactor = 0.08
+    // Allow full 360° rotation — no pole clamp.
+    // OrbitControls clamps phi (polar angle) to [0, PI] by default via
+    // makeSafe(), which prevents rotation past the poles. Setting these
+    // to the full range removes the clamp.
+    this.controls.minPolarAngle = -Infinity
+    this.controls.maxPolarAngle = Infinity
+    // Also remove azimuthal clamp (though it's usually not clamped)
+    this.controls.minAzimuthAngle = -Infinity
+    this.controls.maxAzimuthAngle = Infinity
 
     // Middle-click atom picking: raycaster finds the closest mesh under
     // the cursor and re-centers the orbit target to that point.
@@ -184,6 +197,19 @@ export class HoleViewer {
   private startLoop() {
     const tick = () => {
       this.controls.update()
+      // Manage camera.up to prevent view flipping at the poles.
+      // When the camera passes the pole (phi > PI or phi < 0 in the
+      // spherical representation), the up vector needs to flip to keep
+      // the view stable. OrbitControls doesn't do this automatically.
+      const offset = new THREE.Vector3().subVectors(this.camera.position, this.controls.target)
+      const upDot = offset.dot(new THREE.Vector3(0, 1, 0))
+      if (upDot < 0 && this.camera.up.y > 0) {
+        // Camera is below the target — flip up
+        this.camera.up.set(0, -1, 0)
+      } else if (upDot > 0 && this.camera.up.y < 0) {
+        // Camera is above the target — flip up back
+        this.camera.up.set(0, 1, 0)
+      }
       this.renderer.render(this.scene, this.camera)
       this.rafId = requestAnimationFrame(tick)
     }
@@ -938,5 +964,18 @@ export class HoleViewer {
     if (this.renderer.domElement.parentElement === this.container) {
       this.container.removeChild(this.renderer.domElement)
     }
+  }
+}
+
+// Monkey-patch THREE.Spherical.makeSafe to allow full 360° rotation.
+// The default makeSafe() clamps phi to [1e-6, PI-1e-6], which prevents
+// the camera from going past the poles (looking straight up/down).
+// By making it a no-op, OrbitControls can rotate freely in all directions.
+// This is the same approach used by trackball-style controls.
+function patchSphericalMakeSafe() {
+  const T = getTHREE()
+  if (T.Spherical && !T.Spherical._patched) {
+    T.Spherical.prototype.makeSafe = function() { return this }
+    T.Spherical._patched = true
   }
 }
