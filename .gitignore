@@ -63,3 +63,4 @@ dev.pid
 # micromamba env (downloaded by the mini-service bootstrap)
 /tmp/mamba-root/
 *.zbak
+mini-services/hole2-service/.venv
