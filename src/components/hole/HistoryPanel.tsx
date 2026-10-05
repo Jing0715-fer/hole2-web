@@ -13,7 +13,7 @@ import {
   CartesianGrid, Tooltip, ReferenceLine, Legend,
 } from 'recharts'
 import type { HistoryEntry } from '@/lib/hole/history'
-import { exportComparisonTSV, downloadTSV } from '@/lib/hole/history'
+import { buildComparisonData, exportComparisonTSVNormalized, downloadTSV } from '@/lib/hole/history'
 import { HOLE_NARROW, HOLE_MAX_GREEN } from '@/lib/hole/types'
 
 interface HistoryPanelProps {
@@ -32,39 +32,14 @@ export function HistoryPanel({ entries, selectedIds, onToggleSelect, onRemove, o
     [entries, selectedIds],
   )
 
-  // Build comparison chart data from selected entries
+  // Build comparison chart data from selected entries with normalized t
+  // (constriction point at t=0, so different runs align on the same axis)
   const compareData = useMemo(() => {
-    if (selectedEntries.length === 0) return []
-    const allT = new Set<number>()
-    for (const entry of selectedEntries) {
-      for (const s of entry.profile.samples) {
-        allT.add(Number(s.t.toFixed(2)))
-      }
-    }
-    const sortedT = Array.from(allT).sort((a, b) => a - b)
-    return sortedT.map(t => {
-      const row: Record<string, number> = { t }
-      for (const entry of selectedEntries) {
-        // Find closest sample
-        let bestR = NaN
-        let bestDist = Infinity
-        for (const s of entry.profile.samples) {
-          const d = Math.abs(s.t - t)
-          if (d < bestDist) {
-            bestDist = d
-            bestR = s.r
-          }
-        }
-        if (bestDist < 0.3) {
-          row[entry.label] = Number(bestR.toFixed(3))
-        }
-      }
-      return row
-    })
+    return buildComparisonData(selectedEntries)
   }, [selectedEntries])
 
   const handleExport = () => {
-    const tsv = exportComparisonTSV(selectedEntries)
+    const tsv = exportComparisonTSVNormalized(selectedEntries)
     downloadTSV(tsv, `hole2-comparison-${Date.now()}.tsv`)
   }
 
@@ -194,7 +169,7 @@ export function HistoryPanel({ entries, selectedIds, onToggleSelect, onRemove, o
                     stroke="currentColor"
                     strokeOpacity={0.3}
                     label={{
-                      value: 'Channel coordinate t (Å)',
+                      value: 'Distance from constriction (Å)',
                       position: 'insideBottom',
                       offset: -16,
                       style: { fontSize: 12, fill: 'currentColor', fillOpacity: 0.7 },
@@ -227,6 +202,9 @@ export function HistoryPanel({ entries, selectedIds, onToggleSelect, onRemove, o
                   />
                   <ReferenceLine y={HOLE_NARROW} stroke="#dc2626" strokeDasharray="4 2" strokeOpacity={0.4} />
                   <ReferenceLine y={HOLE_MAX_GREEN} stroke="#2563eb" strokeDasharray="4 2" strokeOpacity={0.4} />
+                  {/* Constriction point marker at t=0 (the alignment anchor) */}
+                  <ReferenceLine x={0} stroke="#fbbf24" strokeDasharray="3 3" strokeOpacity={0.6}
+                    label={{ value: 'constriction', position: 'top', fontSize: 10, fill: '#fbbf24', fillOpacity: 0.8 }} />
                   {selectedEntries.map((entry) => (
                     <Line
                       key={entry.id}

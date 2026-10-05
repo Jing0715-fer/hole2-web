@@ -25,6 +25,14 @@ export interface HistoryEntry {
   pdbName: string
 }
 
+/** Normalized sample for comparison — t is shifted so the constriction
+ *  point (min radius) is at t=0, allowing different runs to be compared
+ *  on the same axis regardless of their absolute coordinate origin. */
+export interface NormalizedSample {
+  t: number   // normalized t (constriction = 0)
+  r: number   // pore radius
+}
+
 const STORAGE_KEY = 'hole2-run-history'
 const MAX_ENTRIES = 20
 
@@ -188,4 +196,108 @@ export function downloadTSV(tsv: string, filename = 'hole2-comparison.tsv'): voi
   a.download = filename
   a.click()
   URL.revokeObjectURL(url)
+}
+
+/** Normalize a profile so the constriction point (min radius) is at t=0.
+ *  This allows comparing runs with different absolute coordinate origins
+ *  (e.g. different PDB structures, different cpoint guesses) on the same
+ *  x-axis. The constriction is the most physically meaningful reference
+ *  point — it's the channel's selectivity filter / gate.
+ *
+ *  Returns samples with t shifted by -constriction_t. */
+export function normalizeProfile(entry: HistoryEntry): NormalizedSample[] {
+  const samples = entry.profile.samples
+  if (samples.length === 0) return []
+  // Find the constriction (sample with minimum r)
+  let minR = Infinity
+  let constrictionT = 0
+  for (const s of samples) {
+    if (s.r < minR) {
+      minR = s.r
+      constrictionT = s.t
+    }
+  }
+  // Shift all t values so constriction is at t=0
+  return samples.map(s => ({
+    t: Number((s.t - constrictionT).toFixed(3)),
+    r: Number(s.r.toFixed(3)),
+  }))
+}
+
+/** Build comparison data from selected entries with normalized t.
+ *  Returns an array of { t, [label1]: r1, [label2]: r2, ... } objects
+ *  where t is relative to the constriction point (t=0 at min radius). */
+export function buildComparisonData(entries: HistoryEntry[]): Record<string, number>[] {
+  if (entries.length === 0) return []
+  // Normalize each entry
+  const normalized = entries.map(e => ({
+    label: e.label,
+    samples: normalizeProfile(e),
+  }))
+  // Collect all unique t values (rounded to 0.5 Å bins for smoother comparison)
+  const tSet = new Set<number>()
+  for (const n of normalized) {
+    for (const s of n.samples) {
+      tSet.add(Math.round(s.t * 2) / 2) // 0.5 Å bins
+    }
+  }
+  const sortedT = Array.from(tSet).sort((a, b) => a - b)
+  // Build comparison rows
+  return sortedT.map(t => {
+    const row: Record<string, number> = { t }
+    for (const n of normalized) {
+      // Find the sample closest to this t value (within 0.5 Å)
+      let bestR: number | null = null
+      let bestDist = Infinity
+      for (const s of n.samples) {
+        const d = Math.abs(s.t - t)
+        if (d < bestDist) {
+          bestDist = d
+          bestR = s.r
+        }
+      }
+      if (bestR !== null && bestDist < 0.5) {
+        row[n.label] = Number(bestR.toFixed(3))
+      }
+    }
+    return row
+  })
+}
+
+/** Export comparison data as TSV with normalized t (constriction at t=0). */
+export function exportComparisonTSVNormalized(entries: HistoryEntry[]): string {
+  const data = buildComparisonData(entries)
+  if (data.length === 0) return 'No data'
+
+  // Header
+  const labels = entries.map(e => e.label)
+  const header = ['t relative to constriction (Å)', ...labels]
+  const rows: string[] = [header.join('\t')]
+
+  // Data rows
+  for (const row of data) {
+    const vals = [row.t.toFixed(2)]
+    for (const label of labels) {
+      const v = row[label]
+      vals.push(v !== undefined ? v.toFixed(4) : '')
+    }
+    rows.push(vals.join('\t'))
+  }
+
+  // Summary section
+  rows.push('')
+  rows.push('=== Summary (constriction at t=0) ===')
+  rows.push(['Run', 'Min R (Å)', 'Max R (Å)', 'Pore Length (Å)', 'G Factor', 'G_macro (pS)'].join('\t'))
+  for (const entry of entries) {
+    rows.push([
+      entry.label,
+      entry.summary.min_radius?.toFixed(4) ?? '',
+      entry.summary.max_radius?.toFixed(4) ?? '',
+      entry.summary.pore_length?.toFixed(2) ?? '',
+      entry.summary.g_factor?.toFixed(4) ?? '',
+      entry.summary.g_macro?.toFixed(2) ?? '',
+    ].join('\t'))
+  }
+
+  return rows.join('\n')
 }

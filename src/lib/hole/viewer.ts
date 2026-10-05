@@ -230,6 +230,13 @@ export class HoleViewer {
   loadStructure(text: string, filename?: string) {
     // dispose existing structure
     this.clearGroup(this.structureGroup)
+    // ALSO clear old HOLE results (surface, centre line, spheres) so the
+    // previous run's pore doesn't linger when a new structure is loaded.
+    this.clearGroup(this.surfaceGroup)
+    this.clearGroup(this.centreLineGroup)
+    this.clearGroup(this.sphereGroup)
+    this.currentCentreline = []
+
     const parsed = parseStructure(text, filename)
     // Do NOT center the structure — the HOLE surface + centre line are
     // computed in the same coordinate system as the PDB, so keeping the
