@@ -2,10 +2,12 @@
  * Front-end API client for the HOLE2 Python mini-service (port 3001).
  *
  * Three modes of operation (auto-detected):
- * 1. Caddy gateway (sandbox): requests use ?XTransformPort=3001
- * 2. Direct: requests go to http://localhost:3001/api/...
- * 3. Next.js proxy fallback: /api/hole/health → http://localhost:3001/api/health
- *    (used when direct access fails due to CORS)
+ * 1. Gateway (sandbox): requests use ?XTransformPort=3001 via Caddy
+ * 2. Proxy (default): /api/hole/health → proxied by Next.js to port 3001
+ * 3. Direct: http://localhost:3001/api/... (rarely needed)
+ *
+ * The proxy mode is the most reliable — it works even if the browser
+ * can't directly reach port 3001 (CORS, firewall, different host).
  */
 
 import type { RunParams, RunResult, OutputFile } from './types'
@@ -26,20 +28,9 @@ async function detectMode(): Promise<Mode> {
     return 'gateway'
   }
 
-  // For localhost/other hosts:
-  // 1. Try gateway (Caddy on port 81)
-  try {
-    const r = await fetch(`/api/health?XTransformPort=${SERVICE_PORT}`, { signal: AbortSignal.timeout(1500) })
-    if (r.ok) { _mode = 'gateway'; return 'gateway' }
-  } catch { /* not available */ }
-
-  // 2. Try direct port 3001
-  try {
-    const r = await fetch(`http://localhost:${SERVICE_PORT}/api/health`, { signal: AbortSignal.timeout(1500) })
-    if (r.ok) { _mode = 'direct'; return 'direct' }
-  } catch { /* not available */ }
-
-  // 3. Fall back to Next.js proxy
+  // For localhost/other hosts: use proxy mode by default.
+  // The Next.js proxy route (/api/hole/*) forwards to localhost:3001.
+  // This is more reliable than direct access (no CORS issues).
   _mode = 'proxy'
   return 'proxy'
 }
@@ -63,7 +54,7 @@ export async function apiUrl(path: string): Promise<string> {
   return buildUrl(path, mode)
 }
 
-/** Synchronous version for href attributes. */
+/** Synchronous version for href attributes (download links etc.). */
 export function apiUrlSync(path: string): string {
   if (typeof window !== 'undefined') {
     const host = window.location.hostname
@@ -71,7 +62,7 @@ export function apiUrlSync(path: string): string {
       return buildUrl(path, 'gateway')
     }
   }
-  // Default to proxy for sync URLs (download links etc.)
+  // Default to proxy for sync URLs
   return buildUrl(path, 'proxy')
 }
 
