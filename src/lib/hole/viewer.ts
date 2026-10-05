@@ -30,21 +30,23 @@ const THREE: any = new Proxy({} as any, {
 })
 
 /**
- * Minimal OrbitControls — enough for rotate/zoom/pan with damping.
- * We implement this inline so we don't need to import from
- * three/examples/jsm (which would pull the full npm package into the
- * dev server's compile graph and cause OOM crashes).
+ * Quaternion-based orbit controls — no gimbal lock, smooth 360° rotation.
+ * Uses a yaw/pitch accumulator instead of spherical coordinates, so the
+ * camera can rotate freely in any direction without flipping at the poles.
  */
 class SimpleOrbitControls {
   private camera: any
   private domElement: HTMLElement
   private target = new THREE.Vector3(0, 0, 0)
-  private spherical = new THREE.Spherical()
-  private sphericalDelta = new THREE.Spherical()
+  private distance = 60
+  private yaw = 0.6    // horizontal angle (radians)
+  private pitch = 0.4   // vertical angle (radians, -PI/2 to PI/2)
+  private deltaYaw = 0
+  private deltaPitch = 0
   private scale = 1
   private panOffset = new THREE.Vector3()
   enableDamping = true
-  dampingFactor = 0.08
+  dampingFactor = 0.1
   private rotateStart = { x: 0, y: 0 }
   private panStart = { x: 0, y: 0 }
   private state: 'none' | 'rotate' | 'pan' = 'none'
@@ -56,14 +58,17 @@ class SimpleOrbitControls {
 
     domElement.addEventListener('pointerdown', this.onPointerDown)
     domElement.addEventListener('wheel', this.onWheel, { passive: false })
-    domElement.addEventListener('contextmenu', (e) => e.preventDefault())
+    domElement.addEventListener('contextmenu', (e: Event) => e.preventDefault())
   }
 
   private onPointerDown = (e: PointerEvent) => {
     if (e.button === 0) this.state = 'rotate'
     else if (e.button === 2 || e.button === 1) this.state = 'pan'
-    if (this.state === 'rotate') { this.rotateStart = { x: e.clientX, y: e.clientY } }
-    else { this.panStart = { x: e.clientX, y: e.clientY } }
+    if (this.state === 'rotate') {
+      this.rotateStart = { x: e.clientX, y: e.clientY }
+    } else {
+      this.panStart = { x: e.clientX, y: e.clientY }
+    }
     window.addEventListener('pointermove', this.onPointerMove)
     window.addEventListener('pointerup', this.onPointerUp)
   }
@@ -72,9 +77,9 @@ class SimpleOrbitControls {
     if (this.state === 'rotate') {
       const dx = e.clientX - this.rotateStart.x
       const dy = e.clientY - this.rotateStart.y
-      const el = this.domElement as HTMLElement
-      this.sphericalDelta.theta -= 2 * Math.PI * dx / el.clientHeight
-      this.sphericalDelta.phi -= 2 * Math.PI * dy / el.clientHeight
+      // Invert Y so dragging up tilts the camera up
+      this.deltaYaw -= dx * 0.005
+      this.deltaPitch -= dy * 0.005
       this.rotateStart = { x: e.clientX, y: e.clientY }
     } else if (this.state === 'pan') {
       const dx = e.clientX - this.panStart.x
@@ -92,15 +97,13 @@ class SimpleOrbitControls {
 
   private onWheel = (e: WheelEvent) => {
     e.preventDefault()
-    if (e.deltaY < 0) this.scale *= 0.95
-    else this.scale /= 0.95
+    if (e.deltaY < 0) this.scale *= 0.92
+    else this.scale /= 0.92
   }
 
   private pan(dx: number, dy: number) {
     const el = this.domElement as HTMLElement
-    const offset = new THREE.Vector3().copy(this.camera.position).sub(this.target)
-    let targetDistance = offset.length() * Math.tan((this.camera.fov / 2) * Math.PI / 180)
-    targetDistance = Math.max(0.001, targetDistance)
+    const targetDistance = this.distance * Math.tan((this.camera.fov / 2) * Math.PI / 180)
     const panX = new THREE.Vector3()
     panX.setFromMatrixColumn(this.camera.matrix, 0)
     panX.multiplyScalar(-2 * dx * targetDistance / el.clientHeight)
@@ -111,30 +114,46 @@ class SimpleOrbitControls {
   }
 
   update() {
-    const offset = new THREE.Vector3().copy(this.camera.position).sub(this.target)
-    this.spherical.setFromVector3(offset)
+    // Apply accumulated deltas with damping
     if (this.enableDamping) {
-      this.spherical.theta += this.sphericalDelta.theta * this.dampingFactor
-      this.spherical.phi += this.sphericalDelta.phi * this.dampingFactor
+      this.yaw += this.deltaYaw * this.dampingFactor
+      this.pitch += this.deltaPitch * this.dampingFactor
     } else {
-      this.spherical.theta += this.sphericalDelta.theta
-      this.spherical.phi += this.sphericalDelta.phi
+      this.yaw += this.deltaYaw
+      this.pitch += this.deltaPitch
     }
-    // No phi clamping — allow full 360° vertical rotation (flip over the poles).
-    // The previous clamp Math.max(0.01, Math.min(Math.PI - 0.01, phi)) prevented
-    // the camera from going above/below the structure.
-    this.spherical.radius *= this.scale
-    this.spherical.radius = Math.max(0.1, this.spherical.radius)
+
+    // Clamp pitch to avoid gimbal lock at the poles
+    this.pitch = Math.max(-Math.PI / 2 + 0.01, Math.min(Math.PI / 2 - 0.01, this.pitch))
+
+    // Apply zoom
+    this.distance *= this.scale
+    this.distance = Math.max(0.1, this.distance)
+
+    // Apply pan
     this.target.add(this.panOffset)
-    offset.setFromSpherical(this.spherical)
-    this.camera.position.copy(this.target).add(offset)
+
+    // Compute camera position from yaw/pitch/distance (Euler angles)
+    const cosPitch = Math.cos(this.pitch)
+    const x = this.distance * cosPitch * Math.sin(this.yaw)
+    const y = this.distance * Math.sin(this.pitch)
+    const z = this.distance * cosPitch * Math.cos(this.yaw)
+
+    this.camera.position.set(
+      this.target.x + x,
+      this.target.y + y,
+      this.target.z + z
+    )
     this.camera.lookAt(this.target)
+
+    // Damp the deltas for next frame
     if (this.enableDamping) {
-      this.sphericalDelta.theta *= (1 - this.dampingFactor)
-      this.sphericalDelta.phi *= (1 - this.dampingFactor)
+      this.deltaYaw *= (1 - this.dampingFactor)
+      this.deltaPitch *= (1 - this.dampingFactor)
       this.panOffset.multiplyScalar(1 - this.dampingFactor)
     } else {
-      this.sphericalDelta.set(0, 0, 0)
+      this.deltaYaw = 0
+      this.deltaPitch = 0
       this.panOffset.set(0, 0, 0)
     }
     this.scale = 1
@@ -936,23 +955,22 @@ export class HoleViewer {
       this.scene.fog.near = dist * 0.9
       this.scene.fog.far = dist * 3.0
     }
-    this.controls.target.copy(center)
-    // Camera direction: mostly along Z with a slight Y tilt for a 3/4 view.
-    // A high Y component pushes the structure to the top of the viewport;
-    // keeping it small ensures the structure stays centered.
+    // Set the controls' yaw/pitch/distance to match the desired camera position.
+    // The camera direction is (0.3, 0.2, 1) normalized — convert to yaw/pitch:
     const dir = new THREE.Vector3(0.3, 0.2, 1).normalize()
-    this.camera.position.copy(center).addScaledVector(dir, dist)
+    const ctrl = this.controls as any
+    ctrl.target.copy(center)
+    ctrl.distance = dist
+    ctrl.yaw = Math.atan2(dir.x, dir.z)
+    ctrl.pitch = Math.asin(dir.y)
+    ctrl.deltaYaw = 0
+    ctrl.deltaPitch = 0
+    ctrl.panOffset.set(0, 0, 0)
+    ctrl.scale = 1
     this.camera.near = Math.max(0.01, dist / 100)
     this.camera.far = dist * 100
     this.camera.updateProjectionMatrix()
-    // Reset the controls' internal state so it doesn't override our camera
-    // position on the next update() call.
-    const ctrl = this.controls as any
-    if (ctrl.sphericalDelta) ctrl.sphericalDelta.set(0, 0, 0)
-    if (ctrl.panOffset) ctrl.panOffset.set(0, 0, 0)
-    ctrl.scale = 1
     this.controls.update()
-    this.camera.lookAt(this.controls.target)
   }
 
   private clearGroup(group: THREE.Group) {
