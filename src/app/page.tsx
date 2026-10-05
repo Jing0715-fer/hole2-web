@@ -222,75 +222,62 @@ export default function Home() {
   }, [])
 
   return (
-    <div className="flex min-h-screen flex-col bg-background text-foreground">
+    <div className="flex min-h-screen flex-col bg-gradient-to-b from-slate-50 to-slate-100 text-foreground dark:from-slate-950 dark:to-slate-900">
       {/* Toasts render via the sonner <Toaster /> mounted once in layout.tsx */}
 
-      {/* Header */}
-      <header className="sticky top-0 z-30 border-b border-border/60 bg-background/85 backdrop-blur supports-[backdrop-filter]:bg-background/70">
-        <div className="mx-auto flex h-14 max-w-[1600px] items-center justify-between gap-4 px-4">
+      {/* Header — glassmorphism with gradient accent */}
+      <header className="sticky top-0 z-30 border-b border-slate-200/60 bg-white/70 backdrop-blur-xl dark:border-slate-800/60 dark:bg-slate-950/70">
+        <div className="mx-auto flex h-16 max-w-[1600px] items-center justify-between gap-4 px-6">
           <div className="flex min-w-0 items-center gap-3">
-            <div className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-emerald-500 to-teal-600 text-white shadow-sm">
+            <div className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-emerald-400 via-teal-500 to-cyan-600 text-white shadow-lg shadow-emerald-500/20">
               <Boxes className="size-5" />
             </div>
             <div className="min-w-0">
-              <h1 className="truncate text-base font-semibold leading-tight">HOLE2 Web</h1>
-              <p className="truncate text-[11px] text-muted-foreground">Ion-channel pore-analysis studio</p>
+              <h1 className="truncate text-lg font-bold leading-tight tracking-tight">HOLE2 Web</h1>
+              <p className="truncate text-xs text-muted-foreground">Ion-channel pore-analysis studio</p>
             </div>
           </div>
           <div className="flex items-center gap-2">
             <Badge variant={serviceReady ? 'secondary' : 'outline'}
-              className="gap-1.5 text-[10px]">
-              <span className={`size-1.5 rounded-full ${serviceReady ? 'bg-emerald-500' : 'bg-amber-500'} ${serviceReady ? '' : 'animate-pulse'}`} />
-              {serviceReady === null ? 'checking…' : serviceReady ? 'HOLE2 service ready' : 'service offline'}
+              className="gap-2 rounded-full border-emerald-200 bg-emerald-50 px-3 py-1 text-xs font-medium text-emerald-700 dark:border-emerald-800 dark:bg-emerald-950/50 dark:text-emerald-400">
+              <span className={`size-2 rounded-full ${serviceReady ? 'bg-emerald-500 shadow-sm shadow-emerald-500/50' : 'bg-amber-500'} ${serviceReady ? '' : 'animate-pulse'}`} />
+              {serviceReady === null ? 'checking…' : serviceReady ? 'Service ready' : 'offline'}
             </Badge>
             <a href="https://github.com/osmart/hole2" target="_blank" rel="noreferrer"
               className="hidden sm:inline-flex">
               <Button variant="ghost" size="sm" className="gap-1.5 text-xs">
-                <Github className="size-3.5" /> HOLE2 repo
-              </Button>
-            </a>
-            <a href="https://github.com/Jing0715-fer/MolVision" target="_blank" rel="noreferrer"
-              className="hidden md:inline-flex">
-              <Button variant="ghost" size="sm" className="gap-1.5 text-xs">
-                <ExternalLink className="size-3.5" /> MolVision
+                <Github className="size-3.5" /> HOLE2
               </Button>
             </a>
           </div>
         </div>
       </header>
 
-      {/* Main content — sticky footer layout */}
-      <main className="mx-auto w-full max-w-[1600px] flex-1 px-4 py-6">
-        {/* Hero */}
-        <section className="mb-6 grid gap-4 lg:grid-cols-[1fr_360px]">
-          <div className="space-y-2">
-            <div className="flex items-center gap-2">
-              <Badge className="bg-emerald-600 hover:bg-emerald-700">HOLE2 2.3.1</Badge>
-              <Badge variant="outline" className="text-[10px]">Smart, Goodfellow & Wallace, 1996</Badge>
-            </div>
-            <h2 className="text-2xl font-bold tracking-tight sm:text-3xl">
-              Analyse the pore dimensions of ion channels — in your browser.
-            </h2>
-            <p className="max-w-3xl text-sm text-muted-foreground">
-              Upload a PDB structure, configure the pore probe (radius set, endrad, channel vector, ignore residues),
-              and HOLE2 will compute the maximum-radius sphere that fits at each point along the pore.
-              Visualise the triangulated pore surface in 3D (red = too narrow for water, green = single-water file,
-              blue = wide), inspect the pore-radius profile chart, and download the original command-line output
-              files (<code>.txt</code>, <code>.sph</code>, <code>.sos</code>, <code>.vmd_plot</code>) byte-for-byte
-              identical to running <code>hole</code> + <code>sph_process</code> + <code>sos_triangle</code> locally.
-            </p>
+      {/* Main content */}
+      <main className="mx-auto w-full max-w-[1600px] flex-1 px-6 py-8">
+        {/* Hero — refined with gradient text */}
+        <section className="mb-8">
+          <div className="flex items-center gap-3 mb-3">
+            <Badge className="bg-gradient-to-r from-emerald-600 to-teal-600 text-white shadow-sm">HOLE2 2.3.1</Badge>
+            <span className="text-xs text-muted-foreground">Smart, Goodfellow & Wallace, 1996</span>
           </div>
-          <div className="flex items-center justify-start gap-3 rounded-xl border border-border/50 bg-muted/20 p-4 lg:justify-end">
-            <div className="flex items-center gap-2 text-xs text-muted-foreground">
-              <BookOpen className="size-4" />
-              <span>Try the <strong className="text-foreground">gramicidin A</strong> demo for a 30-second tour.</span>
-            </div>
-          </div>
+          <h2 className="text-3xl font-bold tracking-tight sm:text-4xl">
+            <span className="bg-gradient-to-r from-slate-900 via-slate-800 to-slate-700 bg-clip-text text-transparent dark:from-white dark:via-slate-200 dark:to-slate-400">
+              Analyse the pore dimensions of
+            </span>{' '}
+            <span className="bg-gradient-to-r from-emerald-600 to-teal-600 bg-clip-text text-transparent">
+              ion channels
+            </span>
+          </h2>
+          <p className="mt-3 max-w-2xl text-sm text-muted-foreground">
+            Upload a structure, configure the pore probe, and HOLE2 computes the maximum-radius sphere
+            that fits at each point along the pore. Visualise the triangulated pore surface in 3D,
+            inspect the radius profile, and download the original CLI output files.
+          </p>
         </section>
 
-        {/* Main 3-column grid — min-w-0 lets the columns shrink below their
-            content's min-content width on narrow (mobile) screens. */}
-        <div className="grid gap-4 lg:grid-cols-[380px_1fr_320px]">
+        {/* Main 3-column grid */}
+        <div className="grid gap-5 lg:grid-cols-[360px_1fr_300px]">
           {/* Left: run form */}
           <div className="min-w-0 space-y-4">
             <RunForm
@@ -312,10 +299,10 @@ export default function Home() {
             />
           </div>
 
-          {/* Middle: 3D viewer (top) + pore profile (bottom), both visible */}
-          <div className="min-w-0 space-y-4">
-            {/* 3D viewer */}
-            <div className="relative h-[50vh] min-h-[380px] overflow-hidden rounded-xl border border-border/60 bg-[#0b1220]">
+          {/* Middle: 3D viewer + profile chart */}
+          <div className="min-w-0 space-y-5">
+            {/* 3D viewer — rounded with subtle shadow */}
+            <div className="relative h-[48vh] min-h-[360px] overflow-hidden rounded-2xl border border-slate-200/60 bg-[#0a0e1a] shadow-xl shadow-slate-900/5 dark:border-slate-800/60">
               {pdbText ? (
                 <Viewer3D
                   pdbText={pdbText}
@@ -324,50 +311,56 @@ export default function Home() {
                   surface={surface}
                   centreline={centreline}
                   options={viewerOpts}
-                  bgColor="#0b1220"
+                  bgColor="#0a0e1a"
                   onReady={(v) => { viewerRef.current = v }}
                 />
               ) : (
-                <div className="flex h-full flex-col items-center justify-center gap-3 text-center text-slate-400">
-                  <BoxSelect className="size-12 opacity-30" />
+                <div className="flex h-full flex-col items-center justify-center gap-4 text-center">
+                  <div className="flex size-16 items-center justify-center rounded-2xl bg-slate-800/50">
+                    <BoxSelect className="size-8 text-slate-500" />
+                  </div>
                   <div>
-                    <p className="text-sm font-medium">No structure loaded</p>
-                    <p className="text-xs opacity-70">Upload a PDB/CIF file, fetch by ID, or pick an example.</p>
+                    <p className="text-sm font-medium text-slate-400">No structure loaded</p>
+                    <p className="text-xs text-slate-500">Upload a PDB/CIF, fetch by ID, or pick an example</p>
                   </div>
                 </div>
               )}
               {running && (
-                <div className="absolute inset-0 flex items-center justify-center bg-background/60 backdrop-blur-sm">
-                  <div className="flex flex-col items-center gap-2 text-foreground">
-                    <Loader2 className="size-8 animate-spin text-emerald-500" />
-                    <p className="text-sm font-medium">Running HOLE2…</p>
+                <div className="absolute inset-0 flex items-center justify-center bg-slate-950/60 backdrop-blur-sm">
+                  <div className="flex flex-col items-center gap-3">
+                    <div className="flex size-12 items-center justify-center rounded-full bg-emerald-500/10">
+                      <Loader2 className="size-6 animate-spin text-emerald-500" />
+                    </div>
+                    <p className="text-sm font-medium text-slate-200">Running HOLE2…</p>
                   </div>
                 </div>
               )}
             </div>
 
-            {/* Pore profile chart (always visible below the 3D viewer) */}
-            <div className="h-[32vh] min-h-[240px] rounded-xl border border-border/60 bg-card p-3">
+            {/* Pore profile chart */}
+            <div className="h-[28vh] min-h-[200px] rounded-2xl border border-slate-200/60 bg-white p-4 shadow-sm dark:border-slate-800/60 dark:bg-slate-900">
               {profile ? (
                 <ProfileChart profile={profile} />
               ) : (
-                <div className="flex h-full flex-col items-center justify-center gap-2 text-center text-muted-foreground">
-                  <Activity className="size-8 opacity-30" />
+                <div className="flex h-full flex-col items-center justify-center gap-3 text-center">
+                  <div className="flex size-12 items-center justify-center rounded-xl bg-slate-100 dark:bg-slate-800">
+                    <Activity className="size-6 text-slate-400" />
+                  </div>
                   <div>
-                    <p className="text-sm font-medium">No profile yet</p>
-                    <p className="text-xs opacity-70">Run HOLE2 to see the pore-radius vs. channel-coordinate plot.</p>
+                    <p className="text-sm font-medium text-muted-foreground">No profile yet</p>
+                    <p className="text-xs text-muted-foreground/70">Run HOLE2 to see the pore-radius plot</p>
                   </div>
                 </div>
               )}
             </div>
 
-            {/* Mobile/tablet results below the viewer */}
+            {/* Mobile/tablet results */}
             <div className="lg:hidden">
               <ResultsPanel result={result} loading={running} error={error} />
             </div>
           </div>
 
-          {/* Right: viewer controls + results (desktop) */}
+          {/* Right: controls + results */}
           <div className="hidden min-w-0 space-y-4 lg:block">
             <ViewerControls
               options={viewerOpts}
@@ -379,24 +372,24 @@ export default function Home() {
         </div>
       </main>
 
-      {/* Footer — sticky to bottom */}
-      <footer className="mt-auto border-t border-border/60 bg-muted/20">
-        <div className="mx-auto flex max-w-[1600px] flex-col items-start justify-between gap-2 px-4 py-4 text-xs text-muted-foreground sm:flex-row sm:items-center">
+      {/* Footer */}
+      <footer className="mt-auto border-t border-slate-200/60 bg-white/50 dark:border-slate-800/60 dark:bg-slate-950/50">
+        <div className="mx-auto flex max-w-[1600px] flex-col items-start justify-between gap-2 px-6 py-4 text-xs text-muted-foreground sm:flex-row sm:items-center">
           <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
             <span className="flex items-center gap-1.5">
               <Activity className="size-3.5" />
-              HOLE2 web app · wrapping the original Fortran HOLE2 suite
+              HOLE2 web app · wrapping the original Fortran suite
             </span>
-            <span className="opacity-50">·</span>
-            <span>3D viewer built with <strong className="text-foreground">three.js</strong>, inspired by <a href="https://github.com/Jing0715-fer/MolVision" target="_blank" rel="noreferrer" className="underline hover:text-foreground">MolVision</a> (MIT)</span>
+            <span className="opacity-40">·</span>
+            <span>3D viewer with <strong className="text-foreground">three.js</strong>, inspired by <a href="https://github.com/Jing0715-fer/MolVision" target="_blank" rel="noreferrer" className="underline hover:text-foreground">MolVision</a></span>
           </div>
           <div className="flex items-center gap-3">
             <a href="https://www.holeprogram.org/" target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 hover:text-foreground">
               <BookOpen className="size-3.5" /> holeprogram.org
             </a>
-            <span className="opacity-50">·</span>
+            <span className="opacity-40">·</span>
             <span className="inline-flex items-center gap-1">
-              <FileDown className="size-3.5" /> Outputs match the CLI byte-for-byte
+              <FileDown className="size-3.5" /> Outputs match CLI byte-for-byte
             </span>
           </div>
         </div>

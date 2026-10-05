@@ -214,11 +214,11 @@ export class HoleViewer {
     this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false, preserveDrawingBuffer: true })
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
     this.renderer.setSize(w, h)
-    this.renderer.setClearColor(0x0b1220, 1)
+    this.renderer.setClearColor(0x0a0e1a, 1)
     container.appendChild(this.renderer.domElement)
 
     this.scene = new THREE.Scene()
-    this.scene.fog = new THREE.Fog(0x0b1220, 80, 250)
+    this.scene.fog = new THREE.Fog(0x0a0e1a, 80, 250)
 
     this.camera = new THREE.PerspectiveCamera(45, w / h, 0.1, 1000)
     this.camera.position.set(0, 0, 60)

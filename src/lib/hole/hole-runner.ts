@@ -96,7 +96,11 @@ export function runInEnv(
 ): ProcResult {
   const env = { ...process.env }
   const binDir = VENDOR_BIN
+  const libDir = path.join(VENDOR_HOLE2, 'lib')
   env.PATH = `${binDir}${path.delimiter}${env.PATH ?? ''}`
+  // Prepend bundled lib dir so the HOLE2 binaries can find libgfortran.so.5
+  // even on systems where it's not installed (e.g. minimal Docker/FC images).
+  env.LD_LIBRARY_PATH = `${libDir}${path.delimiter}${env.LD_LIBRARY_PATH ?? ''}`
 
   const input = opts.input ?? null
   try {
@@ -741,6 +745,7 @@ export function runHolePipeline(
     if (useSmooth) cmd.push('-s')
     const env = { ...process.env }
     env.PATH = `${VENDOR_BIN}${path.delimiter}${env.PATH ?? ''}`
+    env.LD_LIBRARY_PATH = `${path.join(VENDOR_HOLE2, 'lib')}${path.delimiter}${env.LD_LIBRARY_PATH ?? ''}`
     try {
       const result = spawnSync(cmd[0], cmd.slice(1), {
         cwd: workDir,
@@ -818,6 +823,7 @@ export function runHolePipeline(
       const feed = Buffer.from('D\ndotsurface.qpt\ndotsurface.vmd_plot\n1\n')
       const env = { ...process.env }
       env.PATH = `${VENDOR_BIN}${path.delimiter}${env.PATH ?? ''}`
+      env.LD_LIBRARY_PATH = `${path.join(VENDOR_HOLE2, 'lib')}${path.delimiter}${env.LD_LIBRARY_PATH ?? ''}`
       const r = spawnSync(envBin('qpt_conv'), {
         cwd: workDir,
         input: feed,
