@@ -392,10 +392,13 @@ export class HoleViewer {
         // and loops.  Colour: helix=red, sheet=amber, loop=chain colour.
         const ss = anchors[0]?.ss ?? 'L'
         let radius = 0.8
+        // Use per-chain color for ALL SS types — this makes multi-chain
+        // structures (like gramicidin's A/B dimer) visually distinct
+        // instead of all being the same red.
         let color = chainCol
-        if (ss === 'H') { radius = 1.0; color = 0xe0566b }
-        else if (ss === 'E') { radius = 0.7; color = 0xf0a830 }
-        else { radius = 0.6; color = chainCol }
+        if (ss === 'H') { radius = 1.0 }
+        else if (ss === 'E') { radius = 0.7 }
+        else { radius = 0.6 }
         const tubeGeo = new THREE.TubeGeometry(curve, tubularSeg, radius, 10, false)
         const mat = new THREE.MeshStandardMaterial({
           color, roughness: 0.4, metalness: 0.05,
@@ -403,6 +406,19 @@ export class HoleViewer {
         const mesh = new THREE.Mesh(tubeGeo, mat)
         this.structureGroup.add(mesh)
         this.disposables.push(tubeGeo, mat)
+        // Add end-cap spheres at the tube termini so they look finished
+        // (not cut off). This is especially important for multi-chain
+        // structures like gramicidin where the two chains meet at an
+        // interface — the caps make it clear the gap is biological.
+        const capGeo = new THREE.SphereGeometry(radius, 12, 8)
+        const capMat = new THREE.MeshStandardMaterial({ color, roughness: 0.4, metalness: 0.05 })
+        const capStart = new THREE.Mesh(capGeo, capMat)
+        capStart.position.copy(seg[0])
+        const capEnd = new THREE.Mesh(capGeo, capMat)
+        capEnd.position.copy(seg[seg.length - 1])
+        this.structureGroup.add(capStart)
+        this.structureGroup.add(capEnd)
+        this.disposables.push(capGeo, capMat)
       }
     }
   }
