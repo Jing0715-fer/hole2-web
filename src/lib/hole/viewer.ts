@@ -761,7 +761,10 @@ export class HoleViewer {
     const fov = this.camera.fov * Math.PI / 180
     const dist = (maxDim / 2) / Math.tan(fov / 2) * 1.4
     this.controls.target.copy(center)
-    const dir = new THREE.Vector3(1, 0.6, 1).normalize()
+    // Camera direction: mostly along Z with a slight Y tilt for a 3/4 view.
+    // A high Y component pushes the structure to the top of the viewport;
+    // keeping it small ensures the structure stays centered.
+    const dir = new THREE.Vector3(0.3, 0.2, 1).normalize()
     this.camera.position.copy(center).addScaledVector(dir, dist)
     this.camera.near = Math.max(0.01, dist / 100)
     this.camera.far = dist * 100
