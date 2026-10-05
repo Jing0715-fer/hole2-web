@@ -65,48 +65,83 @@ from fastapi.responses import FileResponse, JSONResponse
 # Configuration
 # ---------------------------------------------------------------------------
 
-# The micromamba env that holds the conda-forge hole2 binaries.  It is created
-# lazily on first use (or by the bootstrap script) and then re-used.
+# HOLE2 binaries are BUNDLED in the project's vendor/hole2/ directory.
+# No conda/micromamba installation is needed — the binaries are pre-compiled
+# ELF executables that work with the system's libgfortran.so.5.
+#
+# The vendor/ directory contains:
+#   vendor/hole2/bin/hole, sph_process, sos_triangle, qpt_conv  (executables)
+#   vendor/hole2/rad/*.rad  (5 vdw radius files)
+#   vendor/hole2/examples/  (3 example PDB structures)
+#
+# Fallback: if the bundled binaries don't exist (e.g. during development on a
+# different platform), try the conda env at /tmp/mamba-root/envs/hole2/.
+
+_SERVICE_DIR = Path(__file__).parent.resolve()
+_PROJECT_ROOT = _SERVICE_DIR.parent.parent  # mini-services/hole2-service → project root
+
+# Bundled HOLE2 binaries (primary)
+VENDOR_HOLE2 = _PROJECT_ROOT / "vendor" / "hole2"
+VENDOR_BIN = VENDOR_HOLE2 / "bin"
+VENDOR_RAD = VENDOR_HOLE2 / "rad"
+VENDOR_EXAMPLES = VENDOR_HOLE2 / "examples"
+
+# Conda env fallback (for development)
 MAMBA_ROOT = os.environ.get("MAMBA_ROOT_PREFIX", "/tmp/mamba-root")
 HOLE2_ENV_NAME = os.environ.get("HOLE2_ENV_NAME", "hole2")
-MICROMAMBA_BIN = os.environ.get("MICROMAMBA_BIN", "/tmp/mm/bin/micromamba")
+CONDA_PREFIX = f"{MAMBA_ROOT}/envs/{HOLE2_ENV_NAME}"
 
 # A persistent jobs directory so downloads keep working across requests.
 JOBS_DIR = Path(os.environ.get("HOLE2_JOBS_DIR", "/tmp/hole2-jobs"))
 JOBS_DIR.mkdir(parents=True, exist_ok=True)
 
-# Bundled rad files + example PDBs ship with the conda env, but we expose
-# the ones from the cloned hole2 repo (more discoverable) as a fallback.
-HOLE2_REPO_RAD = Path("/tmp/hole2/rad")
-HOLE2_REPO_EXAMPLES = Path("/tmp/hole2/examples")
+# Rad files + examples: prefer bundled, fall back to conda env, then /tmp/hole2
+HOLE2_REPO_RAD = VENDOR_RAD
+HOLE2_REPO_EXAMPLES = VENDOR_EXAMPLES
 
 
 # ---------------------------------------------------------------------------
-# Environment management
+# Binary resolution
 # ---------------------------------------------------------------------------
 
 def env_bin(name: str) -> str:
-    """Return the absolute path to a binary inside the hole2 micromamba env."""
-    return f"{MAMBA_ROOT}/envs/{HOLE2_ENV_NAME}/bin/{name}"
+    """Return the path to a HOLE2 binary.
+    
+    Tries the bundled vendor/ directory first, then the conda env.
+    """
+    bundled = str(VENDOR_BIN / name)
+    if os.path.isfile(bundled) and os.access(bundled, os.X_OK):
+        return bundled
+    # Fallback to conda env
+    return f"{CONDA_PREFIX}/bin/{name}"
 
 
 def env_prefix() -> str:
-    return f"{MAMBA_ROOT}/envs/{HOLE2_ENV_NAME}"
+    """Return the prefix for finding share/ data (rad files etc.)."""
+    if VENDOR_HOLE2.exists():
+        return str(VENDOR_HOLE2)
+    return CONDA_PREFIX
 
 
 def env_exists() -> bool:
-    return Path(env_prefix()).exists() and Path(env_bin("hole")).exists()
+    """Check if HOLE2 binaries are available (either bundled or conda)."""
+    return os.path.isfile(env_bin("hole")) and os.access(env_bin("hole"), os.X_OK)
 
 
 def run_in_env(args: list[str], *, cwd: str, input_text: str | None = None,
                timeout: int = 300) -> tuple[int, str, str]:
-    """Run a command inside the hole2 conda env (PATH + datadir prepended)."""
-    prefix = env_prefix()
+    """Run a HOLE2 command.
+    
+    With bundled binaries, we just need to set PATH so the binaries can find
+    each other. The system's libgfortran.so.5 provides the Fortran runtime.
+    """
     env = os.environ.copy()
-    env["PATH"] = f"{prefix}/bin:{env.get('PATH', '')}"
-    env["CONDA_PREFIX"] = prefix
-    # hole looks for share/hole2/rad relative to its bin/../share
-    env["HOLE2_DATA"] = f"{prefix}/share/hole2"
+    # Prepend the bin directory to PATH
+    bin_dir = str(VENDOR_BIN) if VENDOR_BIN.exists() else f"{CONDA_PREFIX}/bin"
+    env["PATH"] = f"{bin_dir}:{env.get('PATH', '')}"
+    # For conda env fallback, set CONDA_PREFIX
+    if not VENDOR_HOLE2.exists():
+        env["CONDA_PREFIX"] = CONDA_PREFIX
 
     proc = subprocess.run(
         args,
@@ -555,7 +590,10 @@ async def run_hole_pipeline(pdb_bytes: bytes, pdb_name: str,
         rad_path.write_bytes(custom_rad)
     else:
         rad_set = params.get("radius_set", "simple")
-        bundled = Path(env_prefix()) / "share/hole2/rad" / f"{rad_set}.rad"
+        # Try bundled rad dir (vendor/hole2/rad/), then conda env's share dir
+        bundled = VENDOR_RAD / f"{rad_set}.rad"
+        if not bundled.exists():
+            bundled = Path(CONDA_PREFIX) / "share/hole2/rad" / f"{rad_set}.rad"
         if not bundled.exists() and HOLE2_REPO_RAD.exists():
             bundled = HOLE2_REPO_RAD / f"{rad_set}.rad"
         if not bundled.exists():
@@ -635,7 +673,7 @@ async def run_hole_pipeline(pdb_bytes: bytes, pdb_name: str,
         sos_cmd = [env_bin("sos_triangle")]
         if use_smooth:
             sos_cmd.append("-s")
-        env = {**os.environ, "PATH": f"{env_prefix()}/bin:{os.environ.get('PATH','')}"}
+        env = {**os.environ, "PATH": f"{str(VENDOR_BIN) if VENDOR_BIN.exists() else CONDA_PREFIX + '/bin'}:{os.environ.get('PATH','')}"}
         proc = await asyncio.to_thread(
             lambda: subprocess.run(
                 sos_cmd, input=sos_content, capture_output=True,
@@ -704,7 +742,7 @@ async def run_hole_pipeline(pdb_bytes: bytes, pdb_name: str,
                 lambda: subprocess.run(
                     [env_bin("qpt_conv")],
                     input=feed, capture_output=True, cwd=str(work_dir),
-                    env={**os.environ, "PATH": f"{env_prefix()}/bin:{os.environ.get('PATH','')}"},
+                    env={**os.environ, "PATH": f"{str(VENDOR_BIN) if VENDOR_BIN.exists() else CONDA_PREFIX + '/bin'}:{os.environ.get('PATH','')}"},
                     timeout=60,
                 )
             )
@@ -1035,7 +1073,8 @@ async def download_job_zip(job_id: str):
 async def rad_sets_with_desc():
     """List bundled vdw radius sets with descriptions to help the user choose."""
     names: list[str] = []
-    rad_dir = Path(env_prefix()) / "share/hole2/rad"
+    # Try bundled rad dir (vendor/hole2/rad/), then conda env
+    rad_dir = VENDOR_RAD if VENDOR_RAD.exists() else Path(CONDA_PREFIX) / "share/hole2/rad"
     if rad_dir.exists():
         names = sorted(p.stem for p in rad_dir.glob("*.rad"))
     if not names and HOLE2_REPO_RAD.exists():
