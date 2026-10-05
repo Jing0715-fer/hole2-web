@@ -58,7 +58,7 @@ export default function Home() {
     surfaceOpacity: 1.0,
     sphereScale: 1.0,
   })
-  const viewerRef = useRef<{ capturePNG: () => string } | null>(null)
+  const viewerRef = useRef<{ capturePNG: () => string; highlightPorePosition?: (t: number | null) => void } | null>(null)
 
   // Fetch backend metadata on mount — retry every 3s until the service is ready
   // Also load run history from localStorage
@@ -377,7 +377,10 @@ export default function Home() {
             {/* Pore profile chart */}
             <div className="h-[28vh] min-h-[200px] rounded-2xl border border-slate-200/60 bg-white p-4 shadow-sm dark:border-slate-800/60 dark:bg-slate-900">
               {profile ? (
-                <ProfileChart profile={profile} />
+                <ProfileChart profile={profile} onHover={(t) => {
+                  const v = viewerRef.current as any
+                  if (v && v.highlightPorePosition) v.highlightPorePosition(t)
+                }} />
               ) : (
                 <div className="flex h-full flex-col items-center justify-center gap-3 text-center">
                   <div className="flex size-12 items-center justify-center rounded-xl bg-slate-100 dark:bg-slate-800">

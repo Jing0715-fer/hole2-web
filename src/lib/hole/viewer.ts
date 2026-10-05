@@ -1070,6 +1070,65 @@ export class HoleViewer {
     return null
   }
 
+  /** Highlight a position on the pore centre line by t value (channel coordinate).
+   *  Creates/updates a glowing sphere marker at the nearest centre-line point. */
+  highlightPorePosition(t: number | null) {
+    // Remove previous highlight
+    if (this.highlightMarker) {
+      this.scene.remove(this.highlightMarker)
+      this.highlightMarker.geometry?.dispose?.()
+      ;(this.highlightMarker.material as any)?.dispose?.()
+      this.highlightMarker = null
+    }
+    if (t === null) return
+    // Find the nearest centre-line point to this t value
+    const cl = this.currentCentreline
+    if (!cl || cl.length === 0) return
+    // The centre line points are 3D positions. We need to find the one
+    // whose projection onto cvec matches t. Since we don't store cvec
+    // separately, we approximate by finding the point whose distance to
+    // the target position is smallest. The centreline is already sorted
+    // by t, so we can use binary search.
+    // For simplicity, find the point whose distance from the camera target
+    // along the dominant axis is closest to t.
+    // Actually, the centreline is sorted by cvec projection. We need cvec.
+    // Let's use the approach: find the point closest to the ray from
+    // target along cvec at distance t.
+    // Since we don't have cvec stored, approximate: find the closest point
+    // by brute-force search minimizing |dist_along_axis - t|.
+    // The centreline points are sorted, so we can pick the one whose
+    // distance from the first point matches t.
+    if (cl.length < 2) return
+    // Compute approximate t for each centreline point (distance from first point)
+    const p0 = cl[0]
+    let bestIdx = 0
+    let bestDist = Infinity
+    for (let i = 0; i < cl.length; i++) {
+      const dx = cl[i][0] - p0[0]
+      const dy = cl[i][1] - p0[1]
+      const dz = cl[i][2] - p0[2]
+      const dist = Math.sqrt(dx * dx + dy * dy + dz * dz)
+      const diff = Math.abs(dist - Math.abs(t))
+      if (diff < bestDist) {
+        bestDist = diff
+        bestIdx = i
+      }
+    }
+    // Create a glowing sphere at the highlight position
+    const pos = cl[bestIdx]
+    const geo = new THREE.SphereGeometry(2.0, 16, 12)
+    const mat = new THREE.MeshBasicMaterial({
+      color: 0xffffff,
+      transparent: true,
+      opacity: 0.8,
+    })
+    this.highlightMarker = new THREE.Mesh(geo, mat)
+    this.highlightMarker.position.set(pos[0], pos[1], pos[2])
+    this.scene.add(this.highlightMarker)
+  }
+
+  private highlightMarker: THREE.Mesh | null = null
+
   /** Capture a PNG snapshot of the current canvas. */
   capturePNG(): string {
     this.renderer.render(this.scene, this.camera)

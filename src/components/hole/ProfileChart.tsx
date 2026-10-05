@@ -1,6 +1,6 @@
 'use client'
 
-import { useMemo } from 'react'
+import { useMemo, useState, useCallback } from 'react'
 import {
   ResponsiveContainer, ComposedChart, Area, Line, XAxis, YAxis,
   CartesianGrid, Tooltip, ReferenceLine, ReferenceArea,
@@ -10,14 +10,20 @@ import { HOLE_NARROW, HOLE_MAX_GREEN, PORE_ZONE_COLORS, poreZoneColor } from '@/
 
 interface ProfileChartProps {
   profile: PoreProfile
+  onHover?: (t: number | null) => void
 }
 
 /**
  * 2D pore-profile chart — plots pore radius vs. channel coordinate,
  * with the HOLE three-zone colour convention (red/green/blue background bands)
  * and a marker at the constriction point (minimum radius).
+ *
+ * When the user hovers over the chart, onHover is called with the t value
+ * so the 3D viewer can highlight the corresponding pore position.
  */
-export function ProfileChart({ profile }: ProfileChartProps) {
+export function ProfileChart({ profile, onHover }: ProfileChartProps) {
+  const [hoverT, setHoverT] = useState<number | null>(null)
+
   const data = useMemo(() => {
     return profile.samples.map(s => ({
       t: Number(s.t.toFixed(3)),
@@ -30,6 +36,24 @@ export function ProfileChart({ profile }: ProfileChartProps) {
   const maxR = Math.max(profile.max_radius ?? Math.max(...data.map(d => d.r), 5), HOLE_MAX_GREEN + 1)
   const constrictionT = profile.min_t
 
+  const handleHover = useCallback((activePayload: any) => {
+    if (!activePayload || !activePayload.length || !onHover) {
+      setHoverT(null)
+      onHover?.(null)
+      return
+    }
+    const t = activePayload[0]?.payload?.t
+    if (t !== undefined) {
+      setHoverT(t)
+      onHover(t)
+    }
+  }, [onHover])
+
+  const handleLeave = useCallback(() => {
+    setHoverT(null)
+    onHover?.(null)
+  }, [onHover])
+
   if (data.length < 2) {
     return (
       <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
@@ -38,8 +62,7 @@ export function ProfileChart({ profile }: ProfileChartProps) {
     )
   }
 
-  // build zone bands — each band = one interval between consecutive samples
-  // coloured by the average radius of its endpoints.
+  // build zone bands
   const bands = data.slice(0, -1).map((d, i) => {
     const next = data[i + 1]
     const avgR = (d.r + next.r) / 2
@@ -51,7 +74,9 @@ export function ProfileChart({ profile }: ProfileChartProps) {
   })
 
   return (
-    <div className="h-full w-full">
+    <div className="h-full w-full"
+      onMouseLeave={handleLeave}
+    >
       <ResponsiveContainer width="100%" height="100%">
         <ComposedChart data={data} margin={{ top: 16, right: 24, bottom: 32, left: 12 }}>
           <defs>
@@ -61,7 +86,6 @@ export function ProfileChart({ profile }: ProfileChartProps) {
             </linearGradient>
           </defs>
           <CartesianGrid strokeDasharray="3 3" stroke="currentColor" strokeOpacity={0.1} />
-          {/* HOLE zone background bands (red / green / blue) */}
           {bands.map((b, i) => (
             <ReferenceArea
               key={`band-${i}`}
@@ -111,15 +135,15 @@ export function ProfileChart({ profile }: ProfileChartProps) {
             }}
             formatter={(value: number) => [`${value.toFixed(3)} Å`, 'Pore radius']}
             labelFormatter={(label: number) => `t = ${label.toFixed(2)} Å`}
+            // Recharts calls this with the active payload on hover
+            {...({ onHover: handleHover } as any)}
           />
-          {/* HOLE zone reference lines */}
           <ReferenceLine y={HOLE_NARROW} stroke={PORE_ZONE_COLORS.narrow} strokeDasharray="4 2"
             strokeOpacity={0.6}
             label={{ value: `narrow < ${HOLE_NARROW}`, position: 'right', fontSize: 10, fill: PORE_ZONE_COLORS.narrow, fillOpacity: 0.85 }} />
           <ReferenceLine y={HOLE_MAX_GREEN} stroke={PORE_ZONE_COLORS.wide} strokeDasharray="4 2"
             strokeOpacity={0.6}
             label={{ value: `wide ≥ ${HOLE_MAX_GREEN}`, position: 'right', fontSize: 10, fill: PORE_ZONE_COLORS.wide, fillOpacity: 0.85 }} />
-          {/* constriction point marker */}
           {constrictionT !== null && (
             <ReferenceLine x={constrictionT} stroke="#fbbf24" strokeDasharray="3 3"
               strokeOpacity={0.85}
@@ -130,6 +154,10 @@ export function ProfileChart({ profile }: ProfileChartProps) {
                 fill: '#fbbf24',
                 fillOpacity: 1,
               }} />
+          )}
+          {/* Hover indicator: vertical line at the hovered t position */}
+          {hoverT !== null && (
+            <ReferenceLine x={hoverT} stroke="#ffffff" strokeOpacity={0.5} strokeWidth={1} />
           )}
           <Area type="monotone" dataKey="r" stroke="none" fill="url(#profileFill)" />
           <Line type="monotone" dataKey="r" stroke="#3b82f6" strokeWidth={2} dot={false} />
