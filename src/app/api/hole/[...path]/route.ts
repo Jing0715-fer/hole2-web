@@ -24,10 +24,10 @@ import path from 'path'
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 
-const SERVICE_HOST = '127.0.0.1'
-const SERVICE_PORT = 3001
+const SERVICE_HOST = process.env.HOLE2_SERVICE_HOST || '127.0.0.1'
+const SERVICE_PORT = parseInt(process.env.HOLE2_SERVICE_PORT || '3001', 10)
 const SERVICE_DIR = path.join(process.cwd(), 'mini-services', 'hole2-service')
-const SERVICE_UPSTREAM = `http://${SERVICE_HOST}:${SERVICE_PORT}`
+const SERVICE_UPSTREAM = process.env.HOLE2_SERVICE_URL || `http://${SERVICE_HOST}:${SERVICE_PORT}`
 const MAX_BODY_BYTES = 60 * 1024 * 1024  // PDB (≤50 MB) + rad file + multipart overhead
 
 declare global {

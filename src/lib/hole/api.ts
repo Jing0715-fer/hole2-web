@@ -2,16 +2,55 @@
  * Front-end API client for the HOLE2 Python mini-service.
  *
  * All requests go through the Next.js route handler at /api/hole/* which
- * proxies them to the Python service on 127.0.0.1:3001 (and auto-starts
- * it if it is not running). This works from any origin without CORS or
- * gateway port-forwarding.
+ * proxies them to the Python service (and auto-starts it if it is not
+ * running). This works from any origin without CORS or gateway
+ * port-forwarding, including the sandbox preview domains.
+ *
+ * (A 'gateway' mode using ?XTransformPort=3001 and a 'direct' mode using
+ * http://localhost:3001/api/* exist as fallbacks — selectable via
+ * localStorage.hole2Mode = 'gateway' | 'direct' — but the proxy mode is
+ * strictly the most reliable and is always the default.)
  */
 
 import type { RunParams, RunResult } from './types'
 
-function apiUrl(path: string) {
-  // Path looks like "/api/health" -> "/api/hole/health" (proxied by Next.js)
-  return path.replace(/^\/api\//, '/api/hole/')
+const SERVICE_PORT = 3001
+
+type Mode = 'gateway' | 'direct' | 'proxy'
+
+function detectMode(): Mode {
+  if (typeof window !== 'undefined') {
+    // Allow an explicit override for debugging:
+    //   localStorage.setItem('hole2Mode', 'gateway' | 'direct' | 'proxy')
+    const forced = window.localStorage?.getItem('hole2Mode')
+    if (forced === 'gateway' || forced === 'direct' || forced === 'proxy') return forced
+  }
+  return 'proxy'
+}
+
+function buildUrl(path: string, mode: Mode): string {
+  switch (mode) {
+    case 'gateway': {
+      const sep = path.includes('?') ? '&' : '?'
+      return `${path}${sep}XTransformPort=${SERVICE_PORT}`
+    }
+    case 'direct':
+      return `http://localhost:${SERVICE_PORT}${path}`
+    case 'proxy':
+      // /api/health → /api/hole/health (proxied by the Next.js route handler,
+      // which also spawns/supervises the Python service)
+      return path.replace(/^\/api\//, '/api/hole/')
+  }
+}
+
+/** Build the request URL (proxy mode by default). */
+export function apiUrl(path: string): string {
+  return buildUrl(path, detectMode())
+}
+
+/** Synchronous version for href attributes (download links etc.). */
+export function apiUrlSync(path: string): string {
+  return apiUrl(path)
 }
 
 export interface RadSetInfo {
@@ -55,9 +94,9 @@ export async function fetchExamples(): Promise<ExampleInfo[]> {
 }
 
 /** Build the URL for fetching an example PDB file (so the front-end can
- *  one-click load the gramicidin / cholera-toxin / maltoporin demos). */
+ *  one-click load the gramicidin / cholera-toxin / maltoporin / TRPM8 demos). */
 export function examplePdbUrl(exampleId: string, pdbName: string): string {
-  return apiUrl(`/api/example/${encodeURIComponent(exampleId)}/${encodeURIComponent(pdbName)}`)
+  return apiUrlSync(`/api/example/${encodeURIComponent(exampleId)}/${encodeURIComponent(pdbName)}`)
 }
 
 /** Fetch a structure from RCSB by its 4-character PDB ID (e.g. "1grm").
@@ -82,12 +121,12 @@ export async function fetchPdbId(pdbId: string): Promise<PdbFetchResult> {
 
 /** Build the URL for downloading a raw output file. */
 export function downloadUrl(jobId: string, filename: string): string {
-  return apiUrl(`/api/download/${encodeURIComponent(jobId)}/${encodeURIComponent(filename)}`)
+  return apiUrlSync(`/api/download/${encodeURIComponent(jobId)}/${encodeURIComponent(filename)}`)
 }
 
 /** Build the URL for downloading all output files as a ZIP archive. */
 export function downloadZipUrl(jobId: string): string {
-  return apiUrl(`/api/job/${encodeURIComponent(jobId)}/zip`)
+  return apiUrlSync(`/api/job/${encodeURIComponent(jobId)}/zip`)
 }
 
 export interface JobFile { name: string; size: number }

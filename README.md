@@ -64,7 +64,7 @@ Browser ─── Next.js :3000 (this repo, src/)
 - Node.js 18+ and [bun](https://bun.sh)
 - Python 3.10+ (for the mini-service)
 - **HOLE2 binaries are bundled in `vendor/hole2/`** (pre-compiled Linux x86_64 ELF executables + the 5 `.rad` files + 3 example structures) — no conda/micromamba install is needed on Linux x86_64 with `libgfortran.so.5`. On other platforms run `bash mini-services/hole2-service/bootstrap.sh` once to create the conda-forge fallback env.
-- Internet access on first page load (three.js loads from CDN)
+- Internet access on first page load (three.js loads from CDN; the Python service deps are auto-installed via uv/venv)
 
 ### Quick start (recommended)
 ```bash
@@ -72,10 +72,7 @@ Browser ─── Next.js :3000 (this repo, src/)
 git clone https://github.com/Jing0715-fer/hole2-web.git
 cd hole2-web
 
-# 2. Install the HOLE2 conda-forge env (idempotent — only runs once)
-bash mini-services/hole2-service/bootstrap.sh
-
-# 3. Install frontend deps
+# 2. Install frontend deps
 bun install
 
 # 4. Start the Next.js dev server on port 3000

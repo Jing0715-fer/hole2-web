@@ -54,11 +54,46 @@ export default function Home() {
   })
   const viewerRef = useRef<{ capturePNG: () => string } | null>(null)
 
-  // Fetch backend metadata on mount
+  // Fetch backend metadata on mount — retry every 3s until the service is ready
+  // (the Python service may start after the front-end loads)
   useEffect(() => {
-    fetchHealth().then((h) => setServiceReady(h.env_ready)).catch(() => setServiceReady(false))
-    fetchRadSets().then((r: RadSetInfo) => setRadSets(r)).catch(() => {})
-    fetchExamples().then(setExamples).catch(() => {})
+    let cancelled = false
+    let retryTimer: ReturnType<typeof setTimeout>
+    let attempt = 0
+
+    const check = async () => {
+      if (cancelled) return
+      attempt++
+      try {
+        const h = await fetchHealth()
+        if (cancelled) return
+        if (h.env_ready) {
+          setServiceReady(true)
+          // Service is up — now fetch the metadata
+          fetchRadSets().then((r: RadSetInfo) => setRadSets(r)).catch(() => {})
+          fetchExamples().then(setExamples).catch(() => {})
+        } else {
+          setServiceReady(false)
+          // Retry in 3 seconds (up to 20 attempts = 60s)
+          if (attempt < 20) {
+            retryTimer = setTimeout(check, 3000)
+          }
+        }
+      } catch {
+        if (cancelled) return
+        setServiceReady(false)
+        // Retry in 3 seconds (up to 20 attempts = 60s)
+        if (attempt < 20) {
+          retryTimer = setTimeout(check, 3000)
+        }
+      }
+    }
+    check()
+
+    return () => {
+      cancelled = true
+      clearTimeout(retryTimer)
+    }
   }, [])
 
   // Load PDB/CIF text into the viewer when a new file is picked

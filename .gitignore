@@ -64,3 +64,4 @@ dev.pid
 /tmp/mamba-root/
 *.zbak
 __pycache__/
+mini-services/hole2-service/.venv
