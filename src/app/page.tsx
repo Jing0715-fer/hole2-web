@@ -13,12 +13,14 @@ import { Viewer3D } from '@/components/hole/Viewer3D'
 import { ViewerControls } from '@/components/hole/ViewerControls'
 import { ProfileChart } from '@/components/hole/ProfileChart'
 import { ResultsPanel } from '@/components/hole/ResultsPanel'
+import { HistoryPanel } from '@/components/hole/HistoryPanel'
 import { DEFAULT_PARAMS, type RunParams, type RunResult, type HoleSphere, type HoleSurface } from '@/lib/hole/types'
 import type { HoleViewerOptions } from '@/components/hole/Viewer3D'
 import {
   fetchHealth, fetchRadSets, fetchExamples, runHole, examplePdbUrl, fetchPdbId,
   type ExampleInfo, type RadSetInfo,
 } from '@/lib/hole/api'
+import { loadHistory, addToHistory, removeFromHistory, clearHistory, type HistoryEntry } from '@/lib/hole/history'
 
 const EMPTY_SURFACE: HoleSurface = { triangles: [], colors: [] }
 
@@ -41,6 +43,10 @@ export default function Home() {
   const [result, setResult] = useState<RunResult | null>(null)
   const [error, setError] = useState<string | null>(null)
 
+  // history state
+  const [history, setHistory] = useState<HistoryEntry[]>([])
+  const [selectedHistoryIds, setSelectedHistoryIds] = useState<Set<string>>(new Set())
+
   // viewer state
   const [viewerOpts, setViewerOpts] = useState<HoleViewerOptions>({
     showCartoon: true,
@@ -55,8 +61,9 @@ export default function Home() {
   const viewerRef = useRef<{ capturePNG: () => string } | null>(null)
 
   // Fetch backend metadata on mount — retry every 3s until the service is ready
-  // (the Python service may start after the front-end loads)
+  // Also load run history from localStorage
   useEffect(() => {
+    setHistory(loadHistory())
     let cancelled = false
     let retryTimer: ReturnType<typeof setTimeout>
     let attempt = 0
@@ -160,6 +167,16 @@ export default function Home() {
         toast.error(res.error || 'HOLE2 could not trace a pore — see the warnings below.')
       } else {
         toast.success(`HOLE2 done: min radius ${res.summary.min_radius?.toFixed(3) ?? '—'} Å · ${res.summary.n_triangles} surface triangles`)
+        // Save to history for comparison
+        if (res.profile && res.summary) {
+          setHistory(prev => addToHistory(prev, {
+            id: res.job_id + '_' + Date.now(),
+            pdbName: pdbName || 'input.pdb',
+            params,
+            profile: res.profile,
+            summary: res.summary,
+          }))
+        }
       }
     } catch (e) {
       setError((e as Error).message)
@@ -208,6 +225,31 @@ export default function Home() {
     a.download = `hole2-3d-${Date.now()}.png`
     a.click()
     toast.success('PNG snapshot saved')
+  }, [])
+
+  // History handlers
+  const handleToggleHistorySelect = useCallback((id: string) => {
+    setSelectedHistoryIds(prev => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }, [])
+
+  const handleRemoveHistory = useCallback((id: string) => {
+    setHistory(prev => removeFromHistory(prev, id))
+    setSelectedHistoryIds(prev => {
+      const next = new Set(prev)
+      next.delete(id)
+      return next
+    })
+  }, [])
+
+  const handleClearHistory = useCallback(() => {
+    setHistory(clearHistory())
+    setSelectedHistoryIds(new Set())
+    toast.success('History cleared')
   }, [])
 
   // Debug handle (dev): window.__holeViewer for console diagnostics.
@@ -349,13 +391,20 @@ export default function Home() {
               )}
             </div>
 
-            {/* Mobile/tablet results */}
-            <div className="lg:hidden">
+            {/* Mobile/tablet results + history */}
+            <div className="lg:hidden space-y-4">
               <ResultsPanel result={result} loading={running} error={error} />
+              <HistoryPanel
+                entries={history}
+                selectedIds={selectedHistoryIds}
+                onToggleSelect={handleToggleHistorySelect}
+                onRemove={handleRemoveHistory}
+                onClear={handleClearHistory}
+              />
             </div>
           </div>
 
-          {/* Right: controls + results */}
+          {/* Right: controls + results + history */}
           <div className="hidden min-w-0 space-y-4 lg:block">
             <ViewerControls
               options={viewerOpts}
@@ -363,6 +412,13 @@ export default function Home() {
               onCapturePNG={handleCapturePNG}
             />
             <ResultsPanel result={result} loading={running} error={error} />
+            <HistoryPanel
+              entries={history}
+              selectedIds={selectedHistoryIds}
+              onToggleSelect={handleToggleHistorySelect}
+              onRemove={handleRemoveHistory}
+              onClear={handleClearHistory}
+            />
           </div>
         </div>
       </main>
