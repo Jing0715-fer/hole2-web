@@ -7,9 +7,17 @@
 
 cd "$(dirname "$0")/.."
 
-if [ ! -d ".next" ]; then
+if [ ! -f ".next/standalone/server.js" ]; then
     echo "[dev-server] Build not found, running bun run build..."
-    bun run build
+    NODE_OPTIONS="--max-old-space-size=2048" npx next build
+    # Copy static files into standalone dir (required for serving CSS/JS)
+    cp -r .next/static .next/standalone/.next/ 2>/dev/null
+    cp -r public .next/standalone/ 2>/dev/null
+fi
+
+# Ensure static files are in place (in case of partial builds)
+if [ ! -d ".next/standalone/.next/static" ]; then
+    cp -r .next/static .next/standalone/.next/ 2>/dev/null
 fi
 
 echo "[dev-server] Starting Next.js server on port 3000..."

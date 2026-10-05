@@ -952,7 +952,7 @@ export interface ExampleInfo {
 export function exampleDirs(): string[] {
   const seen = new Set<string>()
   const dirs: string[] = []
-  for (const root of [LOCAL_EXAMPLES, VENDOR_EXAMPLES]) {
+  for (const root of [VENDOR_EXAMPLES, LOCAL_EXAMPLES]) {
     if (!existsSync(root)) continue
     let entries: string[] = []
     try { entries = readdirSync(root) } catch { continue }
@@ -993,7 +993,7 @@ export function listExamples(): ExampleInfo[] {
 /** Resolve an example PDB file path safely (no path traversal). */
 export function resolveExamplePdb(exampleId: string, pdbName: string): string | null {
   if (!SAFE_NAME_RE.test(exampleId) || !SAFE_NAME_RE.test(pdbName)) return null
-  for (const root of [LOCAL_EXAMPLES, VENDOR_EXAMPLES]) {
+  for (const root of [VENDOR_EXAMPLES, LOCAL_EXAMPLES]) {
     if (!existsSync(root)) continue
     const direct = path.join(root, exampleId, pdbName)
     if (existsSync(direct) && statSync(direct).isFile()) {

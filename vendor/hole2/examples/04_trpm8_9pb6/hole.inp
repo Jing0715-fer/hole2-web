@@ -1,0 +1,6 @@
+COORD 9pb6.pdb
+RADIUS simple.rad
+CPOINT 209.639 209.636 202.499
+CVECT 0.0 0.0 1.0
+SPHPDB hole_out.sph
+ENDRAD 22.0
