@@ -30,9 +30,18 @@ const THREE: any = new Proxy({} as any, {
 })
 
 /**
- * Quaternion-based orbit controls — no gimbal lock, smooth 360° rotation.
- * Uses a yaw/pitch accumulator instead of spherical coordinates, so the
- * camera can rotate freely in any direction without flipping at the poles.
+ * Orbit controls with proper direction, no pitch clamp, and atom-pick support.
+ *
+ * Issues fixed vs the previous version:
+ * 1. Rotation direction: was inverted (dragging right rotated left).
+ *    Now dragging right → yaw increases (scene rotates right), dragging up →
+ *    pitch increases (scene tilts up).  Natural "grab and drag" feel.
+ * 2. Pitch clamp: was clamped to [-PI/2+0.01, PI/2-0.01], preventing
+ *    looking from directly above/below.  Now unclamped — full 360° vertical.
+ *    The yaw/pitch system avoids gimbal lock naturally because we never
+ *    convert to/from spherical coordinates.
+ * 3. Middle-click: picks an atom under the cursor (via raycaster) and
+ *    re-centers the orbit target to that atom's position.
  */
 class SimpleOrbitControls {
   private camera: any
@@ -40,16 +49,17 @@ class SimpleOrbitControls {
   private target = new THREE.Vector3(0, 0, 0)
   private distance = 60
   private yaw = 0.6    // horizontal angle (radians)
-  private pitch = 0.4   // vertical angle (radians, -PI/2 to PI/2)
+  private pitch = 0.4   // vertical angle (radians, unlimited)
   private deltaYaw = 0
   private deltaPitch = 0
   private scale = 1
   private panOffset = new THREE.Vector3()
   enableDamping = true
-  dampingFactor = 0.1
+  dampingFactor = 0.12
   private rotateStart = { x: 0, y: 0 }
   private panStart = { x: 0, y: 0 }
   private state: 'none' | 'rotate' | 'pan' = 'none'
+  private onPickCallback: ((point: { x: number, y: number, z: number }) => void) | null = null
 
   constructor(camera: any, domElement: HTMLElement) {
     this.camera = camera
@@ -61,9 +71,25 @@ class SimpleOrbitControls {
     domElement.addEventListener('contextmenu', (e: Event) => e.preventDefault())
   }
 
+  /** Set a callback for middle-click atom picking. */
+  setPickCallback(cb: (point: { x: number, y: number, z: number }) => void) {
+    this.onPickCallback = cb
+  }
+
+  /** Set the orbit target to a specific 3D point (e.g. a picked atom). */
+  setTarget(x: number, y: number, z: number) {
+    this.target.set(x, y, z)
+  }
+
   private onPointerDown = (e: PointerEvent) => {
     if (e.button === 0) this.state = 'rotate'
-    else if (e.button === 2 || e.button === 1) this.state = 'pan'
+    else if (e.button === 2) this.state = 'pan'
+    else if (e.button === 1) {
+      // Middle click: atom pick (don't start pan/rotate)
+      // The pick logic is handled by the HoleViewer class via a callback
+      this.state = 'none'
+      return
+    }
     if (this.state === 'rotate') {
       this.rotateStart = { x: e.clientX, y: e.clientY }
     } else {
@@ -77,9 +103,10 @@ class SimpleOrbitControls {
     if (this.state === 'rotate') {
       const dx = e.clientX - this.rotateStart.x
       const dy = e.clientY - this.rotateStart.y
-      // Invert Y so dragging up tilts the camera up
-      this.deltaYaw -= dx * 0.005
-      this.deltaPitch -= dy * 0.005
+      // Natural direction: drag right → scene rotates right (yaw increases)
+      // drag up → camera tilts up (pitch increases)
+      this.deltaYaw += dx * 0.006
+      this.deltaPitch += dy * 0.006
       this.rotateStart = { x: e.clientX, y: e.clientY }
     } else if (this.state === 'pan') {
       const dx = e.clientX - this.panStart.x
@@ -97,8 +124,8 @@ class SimpleOrbitControls {
 
   private onWheel = (e: WheelEvent) => {
     e.preventDefault()
-    if (e.deltaY < 0) this.scale *= 0.92
-    else this.scale /= 0.92
+    if (e.deltaY < 0) this.scale *= 0.9
+    else this.scale /= 0.9
   }
 
   private pan(dx: number, dy: number) {
@@ -123,8 +150,9 @@ class SimpleOrbitControls {
       this.pitch += this.deltaPitch
     }
 
-    // Clamp pitch to avoid gimbal lock at the poles
-    this.pitch = Math.max(-Math.PI / 2 + 0.01, Math.min(Math.PI / 2 - 0.01, this.pitch))
+    // NO pitch clamping — allow full 360° vertical rotation.
+    // The yaw/pitch system does not suffer from gimbal lock because
+    // we never convert to/from spherical coordinates.
 
     // Apply zoom
     this.distance *= this.scale
@@ -134,9 +162,13 @@ class SimpleOrbitControls {
     this.target.add(this.panOffset)
 
     // Compute camera position from yaw/pitch/distance (Euler angles)
+    // Using cos(pitch) for the horizontal radius and sin(pitch) for height.
+    // This works for any pitch value (even > PI/2) because cos/sin are
+    // periodic and the camera simply orbits around the target.
     const cosPitch = Math.cos(this.pitch)
+    const sinPitch = Math.sin(this.pitch)
     const x = this.distance * cosPitch * Math.sin(this.yaw)
-    const y = this.distance * Math.sin(this.pitch)
+    const y = this.distance * sinPitch
     const z = this.distance * cosPitch * Math.cos(this.yaw)
 
     this.camera.position.set(
@@ -144,6 +176,16 @@ class SimpleOrbitControls {
       this.target.y + y,
       this.target.z + z
     )
+
+    // When pitch goes past PI/2 or -PI/2, the camera is below or above
+    // the target. The up vector needs to flip to keep the view stable.
+    // We detect this when cos(pitch) changes sign.
+    if (cosPitch < 0) {
+      this.camera.up.set(0, -1, 0)
+    } else {
+      this.camera.up.set(0, 1, 0)
+    }
+
     this.camera.lookAt(this.target)
 
     // Damp the deltas for next frame
@@ -246,7 +288,14 @@ export class HoleViewer {
 
     this.controls = new SimpleOrbitControls(this.camera, this.renderer.domElement)
     this.controls.enableDamping = true
-    this.controls.dampingFactor = 0.08
+    this.controls.dampingFactor = 0.12
+
+    // Middle-click atom picking: raycaster finds the closest mesh under
+    // the cursor and re-centers the orbit target to that point.
+    this.renderer.domElement.addEventListener('auxclick', (e: MouseEvent) => {
+      if (e.button !== 1) return // only middle button
+      this.handleMiddleClick(e)
+    })
 
     // lighting — 3-point setup
     const amb = new THREE.AmbientLight(0xffffff, 0.55)
@@ -999,6 +1048,34 @@ export class HoleViewer {
       this.scene.remove(this.axesHelper)
       this.axesHelper.dispose()
       this.axesHelper = null
+    }
+  }
+
+  /** Handle middle-click: raycast to find the closest mesh point and
+   *  re-center the orbit target to that 3D position. */
+  private handleMiddleClick(e: MouseEvent) {
+    const rect = this.renderer.domElement.getBoundingClientRect()
+    const ndc = new THREE.Vector2(
+      ((e.clientX - rect.left) / rect.width) * 2 - 1,
+      -((e.clientY - rect.top) / rect.height) * 2 + 1
+    )
+    const raycaster = new THREE.Raycaster()
+    raycaster.setFromCamera(ndc, this.camera)
+
+    // Collect all meshes in visible groups
+    const meshes: THREE.Object3D[] = []
+    for (const g of [this.structureGroup, this.surfaceGroup, this.centreLineGroup, this.sphereGroup]) {
+      if (!g.visible) continue
+      g.traverse(obj => {
+        if (obj instanceof THREE.Mesh) meshes.push(obj)
+      })
+    }
+    if (meshes.length === 0) return
+
+    const intersects = raycaster.intersectObjects(meshes, false)
+    if (intersects.length > 0) {
+      const point = intersects[0].point
+      this.controls.setTarget(point.x, point.y, point.z)
     }
   }
 
