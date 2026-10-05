@@ -15,7 +15,7 @@ import { ViewerControls } from '@/components/hole/ViewerControls'
 import { ProfileChart } from '@/components/hole/ProfileChart'
 import { ResultsPanel } from '@/components/hole/ResultsPanel'
 import { DEFAULT_PARAMS, type RunParams, type RunResult, type HoleSphere, type HoleSurface } from '@/lib/hole/types'
-import { HoleViewer, type HoleViewerOptions } from '@/lib/hole/viewer'
+import type { HoleViewerOptions } from '@/components/hole/Viewer3D'
 import {
   fetchHealth, fetchRadSets, fetchExamples, runHole, examplePdbUrl, fetchPdbId,
   type ExampleInfo, type RadSetInfo,
@@ -53,7 +53,7 @@ export default function Home() {
     surfaceOpacity: 0.85,
     sphereScale: 1.0,
   })
-  const viewerRef = useRef<HoleViewer | null>(null)
+  const viewerRef = useRef<{ capturePNG: () => string } | null>(null)
 
   // Fetch backend metadata on mount
   useEffect(() => {

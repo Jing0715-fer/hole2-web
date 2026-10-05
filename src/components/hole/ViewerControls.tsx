@@ -6,7 +6,7 @@ import { Switch } from '@/components/ui/switch'
 import { Slider } from '@/components/ui/slider'
 import { Label } from '@/components/ui/label'
 import { Button } from '@/components/ui/button'
-import type { HoleViewerOptions } from '@/lib/hole/viewer'
+import type { HoleViewerOptions } from '@/components/hole/Viewer3D'
 import { HOLE_NARROW, HOLE_MAX_GREEN, PORE_ZONE_COLORS } from '@/lib/hole/types'
 
 interface ViewerControlsProps {

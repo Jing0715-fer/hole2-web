@@ -5,14 +5,147 @@
  * for ligands) together with the HOLE2 pore surface (a coloured triangle mesh
  * parsed from the .vmd_plot output) and the pore centre line.
  *
- * 3D rendering approach inspired by MolVision (MIT, Jing0715-fer) — uses
- * InstancedMesh for atoms, half-bond-coloured cylinders for sticks, and a
- * flat-shaded BufferGeometry for the HOLE surface so the per-vertex colour
- * (red/green/blue pore zones) shows through.
+ * 3D rendering approach inspired by MolVision (MIT, Jing0715-fer).
+ *
+ * three.js is loaded from a CDN (see layout.tsx) as `window.THREE` so the
+ * dev server doesn't need to compile the 23 MB npm package — this avoids
+ * OOM crashes in the sandbox's 4 GB cgroup.
  */
 
-import * as THREE from 'three'
-import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
+// THREE is loaded from a CDN script tag (see layout.tsx). We access it via
+// a getter function so the async CDN script can finish loading after this
+// module is first imported. The Viewer3D component waits for window.THREE
+// before constructing HoleViewer, so by the time any THREE API is called,
+// the library is ready.
+function getTHREE(): any {
+  if (typeof window === 'undefined') throw new Error('window not available (SSR)')
+  const T = (window as any).THREE
+  if (!T) throw new Error('three.js CDN script not loaded yet')
+  return T
+}
+// THREE behaves like the real three.js namespace — every property access
+// is forwarded to window.THREE at call time.
+const THREE: any = new Proxy({} as any, {
+  get(_t, prop) { return getTHREE()[prop] },
+})
+
+/**
+ * Minimal OrbitControls — enough for rotate/zoom/pan with damping.
+ * We implement this inline so we don't need to import from
+ * three/examples/jsm (which would pull the full npm package into the
+ * dev server's compile graph and cause OOM crashes).
+ */
+class SimpleOrbitControls {
+  private camera: any
+  private domElement: HTMLElement
+  private target = new THREE.Vector3(0, 0, 0)
+  private spherical = new THREE.Spherical()
+  private sphericalDelta = new THREE.Spherical()
+  private scale = 1
+  private panOffset = new THREE.Vector3()
+  enableDamping = true
+  dampingFactor = 0.08
+  private rotateStart = { x: 0, y: 0 }
+  private panStart = { x: 0, y: 0 }
+  private state: 'none' | 'rotate' | 'pan' = 'none'
+
+  constructor(camera: any, domElement: HTMLElement) {
+    this.camera = camera
+    this.domElement = domElement
+    this.update()
+
+    domElement.addEventListener('pointerdown', this.onPointerDown)
+    domElement.addEventListener('wheel', this.onWheel, { passive: false })
+    domElement.addEventListener('contextmenu', (e) => e.preventDefault())
+  }
+
+  private onPointerDown = (e: PointerEvent) => {
+    if (e.button === 0) this.state = 'rotate'
+    else if (e.button === 2 || e.button === 1) this.state = 'pan'
+    if (this.state === 'rotate') { this.rotateStart = { x: e.clientX, y: e.clientY } }
+    else { this.panStart = { x: e.clientX, y: e.clientY } }
+    window.addEventListener('pointermove', this.onPointerMove)
+    window.addEventListener('pointerup', this.onPointerUp)
+  }
+
+  private onPointerMove = (e: PointerEvent) => {
+    if (this.state === 'rotate') {
+      const dx = e.clientX - this.rotateStart.x
+      const dy = e.clientY - this.rotateStart.y
+      const el = this.domElement as HTMLElement
+      this.sphericalDelta.theta -= 2 * Math.PI * dx / el.clientHeight
+      this.sphericalDelta.phi -= 2 * Math.PI * dy / el.clientHeight
+      this.rotateStart = { x: e.clientX, y: e.clientY }
+    } else if (this.state === 'pan') {
+      const dx = e.clientX - this.panStart.x
+      const dy = e.clientY - this.panStart.y
+      this.pan(dx, dy)
+      this.panStart = { x: e.clientX, y: e.clientY }
+    }
+  }
+
+  private onPointerUp = () => {
+    this.state = 'none'
+    window.removeEventListener('pointermove', this.onPointerMove)
+    window.removeEventListener('pointerup', this.onPointerUp)
+  }
+
+  private onWheel = (e: WheelEvent) => {
+    e.preventDefault()
+    if (e.deltaY < 0) this.scale *= 0.95
+    else this.scale /= 0.95
+  }
+
+  private pan(dx: number, dy: number) {
+    const el = this.domElement as HTMLElement
+    const offset = new THREE.Vector3().copy(this.camera.position).sub(this.target)
+    let targetDistance = offset.length() * Math.tan((this.camera.fov / 2) * Math.PI / 180)
+    targetDistance = Math.max(0.001, targetDistance)
+    const panX = new THREE.Vector3()
+    panX.setFromMatrixColumn(this.camera.matrix, 0)
+    panX.multiplyScalar(-2 * dx * targetDistance / el.clientHeight)
+    const panY = new THREE.Vector3()
+    panY.setFromMatrixColumn(this.camera.matrix, 1)
+    panY.multiplyScalar(2 * dy * targetDistance / el.clientHeight)
+    this.panOffset.add(panX).add(panY)
+  }
+
+  update() {
+    const offset = new THREE.Vector3().copy(this.camera.position).sub(this.target)
+    this.spherical.setFromVector3(offset)
+    if (this.enableDamping) {
+      this.spherical.theta += this.sphericalDelta.theta * this.dampingFactor
+      this.spherical.phi += this.sphericalDelta.phi * this.dampingFactor
+    } else {
+      this.spherical.theta += this.sphericalDelta.theta
+      this.spherical.phi += this.sphericalDelta.phi
+    }
+    this.spherical.phi = Math.max(0.01, Math.min(Math.PI - 0.01, this.spherical.phi))
+    this.spherical.radius *= this.scale
+    this.spherical.radius = Math.max(0.1, this.spherical.radius)
+    this.target.add(this.panOffset)
+    offset.setFromSpherical(this.spherical)
+    this.camera.position.copy(this.target).add(offset)
+    this.camera.lookAt(this.target)
+    if (this.enableDamping) {
+      this.sphericalDelta.theta *= (1 - this.dampingFactor)
+      this.sphericalDelta.phi *= (1 - this.dampingFactor)
+      this.panOffset.multiplyScalar(1 - this.dampingFactor)
+    } else {
+      this.sphericalDelta.set(0, 0, 0)
+      this.panOffset.set(0, 0, 0)
+    }
+    this.scale = 1
+  }
+
+  dispose() {
+    this.domElement.removeEventListener('pointerdown', this.onPointerDown)
+    this.domElement.removeEventListener('wheel', this.onWheel)
+    window.removeEventListener('pointermove', this.onPointerMove)
+    window.removeEventListener('pointerup', this.onPointerUp)
+  }
+}
+
 import {
   parsePDB, parseStructure, computeBonds, elementInfo, isProtein, isNucleic, isWater,
   centerStructure, geometricCentre, type PdbStructure,
@@ -43,7 +176,7 @@ export class HoleViewer {
   private renderer: THREE.WebGLRenderer
   private scene: THREE.Scene
   private camera: THREE.PerspectiveCamera
-  private controls: OrbitControls
+  private controls: SimpleOrbitControls
   private rafId: number | null = null
   private resizeObserver: ResizeObserver | null = null
   private container: HTMLElement
@@ -90,7 +223,7 @@ export class HoleViewer {
     this.camera = new THREE.PerspectiveCamera(45, w / h, 0.1, 1000)
     this.camera.position.set(0, 0, 60)
 
-    this.controls = new OrbitControls(this.camera, this.renderer.domElement)
+    this.controls = new SimpleOrbitControls(this.camera, this.renderer.domElement)
     this.controls.enableDamping = true
     this.controls.dampingFactor = 0.08
 
@@ -289,7 +422,6 @@ export class HoleViewer {
       }
 
       const chainCol = chainColorMap.get(chain.id) ?? 0x10b981
-      const isNucleic = anchors[0] !== undefined && !s.residues[chain.residueIdx[0]]?.ss
       // Build cartoon segments: for each contiguous SS run, build the right geometry
       for (const seg of segments) {
         if (seg.length < 2) continue
@@ -316,20 +448,8 @@ export class HoleViewer {
               this.structureGroup.add(mesh)
               this.disposables.push(tubeGeo, mat)
             } else if (ss === 'E') {
-              // Sheet → flat ribbon (use a flat extruded shape)
+              // Sheet → flat ribbon: create a tube then flatten it by scaling
               const tubeGeo = new THREE.TubeGeometry(curve, tubularSeg, 0.25, 4, false)
-              // Flatten by scaling Y → use a custom geometry: take the tube and squash
-              const posAttr = tubeGeo.attributes.position as THREE.BufferAttribute
-              const v = new THREE.Vector3()
-              for (let k = 0; k < posAttr.count; k++) {
-                v.fromBufferAttribute(posAttr, k)
-                // Find the cross-section centre for this slice (approx: nearest point on curve)
-                // Simple flatten: scale the offset from the curve centre in X (width) and Y (thickness)
-                // TubeGeometry already gives us radial offset; we scale X by 3 to make flat
-                // For simplicity, scale x by 3.2 and y by 0.3 (relative to tube centre)
-                // Actually just scale the whole geometry's X by 3 and Y by 0.5:
-              }
-              // Apply scale to make it flat (ribbon)
               tubeGeo.scale(3.2, 0.5, 1)
               const mat = new THREE.MeshStandardMaterial({
                 color: 0xf0a830, roughness: 0.4, metalness: 0.05, side: THREE.DoubleSide,
