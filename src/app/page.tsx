@@ -7,7 +7,6 @@ import {
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
-import { Toaster } from '@/components/ui/toaster'
 import { toast } from 'sonner'
 import { RunForm } from '@/components/hole/RunForm'
 import { Viewer3D } from '@/components/hole/Viewer3D'
@@ -80,12 +79,17 @@ export default function Home() {
       const file = new File([blob], pdb, { type: 'chemical/x-pdb' })
       setPdbFile(file)
       setPdbName(pdb)
-      // apply the example's recommended params where possible
-      // (gramicidin → endrad 5, no ignore; cholera toxin → connolly + ignore HOH; maltoporin → cvect Z + cpoint)
+      // Apply the example's recommended parameters (served by the backend
+      // in /api/examples). Falls back to the historical hard-coded params
+      // for the three original HOLE2 examples when the server omits them.
       const next = { ...DEFAULT_PARAMS }
-      if (ex.id.includes('gramicidin')) {
+      const p = (ex as ExampleInfo & { params?: Record<string, string | boolean> }).params
+      if (p && typeof p === 'object' && Object.keys(p).length > 0) {
+        for (const [k, v] of Object.entries(p)) {
+          if (k in next) (next as Record<string, unknown>)[k] = typeof v === 'boolean' ? v : String(v)
+        }
+      } else if (ex.id.includes('gramicidin')) {
         next.endrad = '5.0'
-        next.ignore_residues = ''
         next.shorto = '0'  // full output so the profile is parsed
         next.dotden = '15'
       } else if (ex.id.includes('choleratoxin')) {
@@ -101,7 +105,7 @@ export default function Home() {
         next.dotden = '15'
       }
       setParams(next)
-      toast.success(`Loaded ${pdb} (${(blob.size / 1024).toFixed(1)} KB)`)
+      toast.success(`Loaded ${pdb} (${(blob.size / 1024 / 1024).toFixed(1)} MB)`)
     } catch (e) {
       toast.error('Failed to load example: ' + (e as Error).message)
     }
@@ -115,8 +119,10 @@ export default function Home() {
     try {
       const res = await runHole(pdbFile, pdbName || 'input.pdb', params, customRad)
       setResult(res)
-      if (res.error) {
-        toast.error('HOLE2 reported an error — see the log below.')
+      if (res.error || res.summary?.status === 'no_pore' || res.summary?.status === 'error') {
+        // HOLE ran but could not trace a pore (or crashed) — the warnings
+        // array carries actionable hints (CVECT/CPOINT, endrad, ignore).
+        toast.error(res.error || 'HOLE2 could not trace a pore — see the warnings below.')
       } else {
         toast.success(`HOLE2 done: min radius ${res.summary.min_radius?.toFixed(3) ?? '—'} Å · ${res.summary.n_triangles} surface triangles`)
       }
@@ -169,9 +175,20 @@ export default function Home() {
     toast.success('PNG snapshot saved')
   }, [])
 
+  // Debug handle (dev): window.__holeViewer for console diagnostics.
+  useEffect(() => {
+    const t = setInterval(() => {
+      if (viewerRef.current) {
+        (window as unknown as Record<string, unknown>).__holeViewer = viewerRef.current
+        clearInterval(t)
+      }
+    }, 200)
+    return () => clearInterval(t)
+  }, [])
+
   return (
     <div className="flex min-h-screen flex-col bg-background text-foreground">
-      <Toaster />
+      {/* Toasts render via the sonner <Toaster /> mounted once in layout.tsx */}
 
       {/* Header */}
       <header className="sticky top-0 z-30 border-b border-border/60 bg-background/85 backdrop-blur supports-[backdrop-filter]:bg-background/70">
@@ -236,10 +253,11 @@ export default function Home() {
           </div>
         </section>
 
-        {/* Main 3-column grid */}
+        {/* Main 3-column grid — min-w-0 lets the columns shrink below their
+            content's min-content width on narrow (mobile) screens. */}
         <div className="grid gap-4 lg:grid-cols-[380px_1fr_320px]">
           {/* Left: run form */}
-          <div className="space-y-4">
+          <div className="min-w-0 space-y-4">
             <RunForm
               params={params}
               onParamsChange={setParams}
@@ -260,7 +278,7 @@ export default function Home() {
           </div>
 
           {/* Middle: 3D viewer (top) + pore profile (bottom), both visible */}
-          <div className="space-y-4">
+          <div className="min-w-0 space-y-4">
             {/* 3D viewer */}
             <div className="relative h-[50vh] min-h-[380px] overflow-hidden rounded-xl border border-border/60 bg-[#0b1220]">
               {pdbText ? (
@@ -315,7 +333,7 @@ export default function Home() {
           </div>
 
           {/* Right: viewer controls + results (desktop) */}
-          <div className="hidden space-y-4 lg:block">
+          <div className="hidden min-w-0 space-y-4 lg:block">
             <ViewerControls
               options={viewerOpts}
               onChange={setViewerOpts}

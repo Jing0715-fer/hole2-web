@@ -194,7 +194,12 @@ export function RunForm(props: RunFormProps) {
             <Label htmlFor="radius-set" className="text-xs font-medium">vdW radius set</Label>
             <Select value={params.radius_set} onValueChange={(v) => set({ radius_set: v })}>
               <SelectTrigger id="radius-set" className="h-9 w-full">
-                <SelectValue />
+                {/* Render a compact value — showing the full description here
+                    gives the trigger a ~770px min-content width, which blows
+                    out the single-column mobile layout. */}
+                <SelectValue>
+                  {(params.radius_set || 'simple')}.rad
+                </SelectValue>
               </SelectTrigger>
               <SelectContent className="max-w-[340px]">
                 {radSets.rad_sets.map((r) => (
@@ -210,12 +215,14 @@ export function RunForm(props: RunFormProps) {
           </div>
           <div className="space-y-1.5">
             <Label htmlFor="endrad" className="text-xs font-medium">End radius (Å)</Label>
-            <Input id="endrad" type="number" step="0.1" min="1" max="20"
+            <Input id="endrad" type="number" step="0.1" min="1" max="40"
               value={params.endrad}
               onChange={(e) => set({ endrad: e.target.value })}
               className="h-9 font-mono" />
             <p className="text-[10px] leading-snug text-muted-foreground">
-              Pore radius at which HOLE stops (5 Å = narrow channel)
+              Pore radius at which HOLE stops (5 Å = narrow channel). <strong>Wide vestibule?</strong>
+              For channels with a large central cavity (e.g. TRPM8 9PB6, ~19 Å) raise this above the
+              cavity radius (≈ 20–25 Å) or the trace stops at the first wide point.
             </p>
           </div>
         </div>

@@ -26,7 +26,7 @@ export function ProfileChart({ profile }: ProfileChartProps) {
     }))
   }, [profile])
 
-  const minR = profile.min_radius ?? Math.min(...data.map(d => d.r), 0)
+  const minR = profile.min_radius ?? Math.min(...data.map(d => d.r))
   const maxR = Math.max(profile.max_radius ?? Math.max(...data.map(d => d.r), 5), HOLE_MAX_GREEN + 1)
   const constrictionT = profile.min_t
 

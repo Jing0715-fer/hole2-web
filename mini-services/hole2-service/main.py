@@ -35,9 +35,9 @@ GET /api/download/{job_id}/{filename}
 GET /api/rad-sets
     returns the list of bundled vdw radius set files (simple.rad etc.)
 
-GET /api/example/{name}
-    returns a bundled example PDB + hole.inp so the user can try the
-    gramicidin / cholera-toxin / maltoporin demos with one click.
+GET /api/example/{example_id}/{pdb_name}
+    streams a bundled example PDB file (gramicidin / cholera-toxin /
+    maltoporin / TRPM8 demos) so the front-end can load them with one click.
 
 GET /api/health
     liveness probe.
@@ -46,12 +46,10 @@ GET /api/health
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 import re
 import shutil
 import subprocess
-import tempfile
 import uuid
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
@@ -79,6 +77,22 @@ JOBS_DIR.mkdir(parents=True, exist_ok=True)
 # the ones from the cloned hole2 repo (more discoverable) as a fallback.
 HOLE2_REPO_RAD = Path("/tmp/hole2/rad")
 HOLE2_REPO_EXAMPLES = Path("/tmp/hole2/examples")
+# Repo-local examples (shipped with this repository) take priority over the
+# cloned osmart/hole2 examples so the app is self-contained.
+LOCAL_EXAMPLES = Path(__file__).resolve().parent / "examples"
+
+# ---------------------------------------------------------------------------
+# Hardening constants
+# ---------------------------------------------------------------------------
+
+MAX_UPLOAD_BYTES = 50 * 1024 * 1024   # 50 MB — matches the UI promise
+MAX_RAD_BYTES = 1 * 1024 * 1024       # 1 MB is plenty for a .rad file
+JOB_ID_RE = re.compile(r"^[0-9a-f]{12}$")
+SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+IGNORE_RE = re.compile(r"^[A-Za-z0-9 _-]+$")
+JOB_MAX_AGE_S = 24 * 3600             # delete job dirs older than 24 h
+JOB_SWEEP_INTERVAL_S = 600            # sweep every 10 min
+MAX_CONCURRENT_RUNS = 2               # Fortran pipelines running at once
 
 
 # ---------------------------------------------------------------------------
@@ -197,8 +211,20 @@ _CGUESS_CVECT = re.compile(r"^CVECT\s+(-?\d+\.\d+)\s+(-?\d+\.\d+)\s+(-?\d+\.\d+)
 _CGUESS_CPOINT = re.compile(r"^CPOINT\s+(-?\d+\.\d+)\s+(-?\d+\.\d+)\s+(-?\d+\.\d+)", re.I | re.M)
 # "F= sum(ds/area) along channel is    4.370 angstroms**-1"
 _G_FACTOR = re.compile(r"F=\s*sum\(ds/area\).*?is\s+(-?\d+\.\d+)", re.I)
-# "Gmacro=   274.60041"
-_GMACRO = re.compile(r"Gmacro=\s*(-?\d+\.\d+)", re.I)
+# "Gmacro=   274.60041" — the Fortran SF2 format writes e-notation whenever
+# the decimal exponent falls outside [-2, 5] (e.g. "1.2e+08"), so accept an
+# optional exponent. Prefer the TAG summary line when present (it also gives
+# Rmin) because the plain "Gmacro=" line can be the degenerate "0.0e***".
+_GMACRO = re.compile(r"Gmacro=\s*([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)", re.I)
+_GMACRO_TAG = re.compile(
+    r"TAG\s+\d+\s+Rmin=\s*([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)\s+"
+    r"Gmacro=\s*(Infinity|[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)", re.I)
+# cguess prints its chosen channel direction: "Best direction is found to be     1"
+_BEST_DIRECTION = re.compile(r"Best direction is found to be\s+(\d)")
+# Hard error lines from hole.f (every fatal path prints an "ERROR" line)
+_ERROR_LINES = re.compile(r"^.*\bERROR\b.*$", re.I | re.M)
+# HOLE's no-pore sentinel: "Minimum radius found:  99999.000 angstroms."
+_NO_PORE_SENTINEL = 9999.0
 
 
 def parse_hole_stdout(text: str) -> PoreProfile:
@@ -252,9 +278,18 @@ def parse_hole_stdout(text: str) -> PoreProfile:
     gf = _G_FACTOR.search(text)
     if gf:
         prof.g_factor = float(gf.group(1))
-    gm = _GMACRO.search(text)
-    if gm:
-        prof.g_macro = float(gm.group(1))
+    # Gmacro: prefer the TAG summary line (also carries Rmin); fall back to
+    # the plain "Gmacro=" line. Both regexes accept exponent notation.
+    gm = _GMACRO_TAG.search(text)
+    if gm and gm.group(2).lower() != "infinity":
+        prof.g_macro = float(gm.group(2))
+    else:
+        gm2 = _GMACRO.search(text)
+        if gm2:
+            try:
+                prof.g_macro = float(gm2.group(1))
+            except ValueError:
+                prof.g_macro = None
 
     if prof.samples:
         prof.n_samples = len(prof.samples)
@@ -269,6 +304,10 @@ def parse_hole_stdout(text: str) -> PoreProfile:
         min_sample = min(prof.samples, key=lambda s: s.r)
         prof.min_radius = min_sample.r
         prof.min_t = min_sample.t
+    elif (prof.min_radius is not None and prof.min_radius >= _NO_PORE_SENTINEL):
+        # HOLE traced nothing (e.g. it could not find a path from cpoint to
+        # solvent below endrad) and printed its 99999 "no pore" sentinel.
+        prof.min_radius = None
     return prof
 
 
@@ -404,13 +443,13 @@ def centre_line_spheres(spheres: list[dict]) -> list[dict]:
     """Return only the real pore centre-line spheres.
 
     HOLE numbers the actual centre-line spheres as 0, 1, 2, ... (one side
-    of cpoint) and -1, -2, ... (the other side).  Other sentinels:
+    of cpoint) and -1, -2, ... (the other side) with NO lower bound, so any
+    filter like ``idx > -100`` would silently truncate long pores with more
+    than 99 reverse-direction samples.  The only other sentinels are:
       -888 = end markers (already filtered in parse_sph_file)
-      -999 = Connolly-probe cloud points (large pores with CONNOLLY option)
-    For the centre-line tube we want ONLY the numbered spheres, sorted by
-    their projection onto cvec.
+      -999 = Connolly-probe cloud points (large pores, CONNOLLY option)
     """
-    return [s for s in spheres if s.get("idx", 0) > -100]
+    return [s for s in spheres if s.get("idx", 0) != -999]
 
 
 def parse_sos_vmd(path: Path) -> dict:
@@ -569,13 +608,22 @@ async def run_hole_pipeline(pdb_bytes: bytes, pdb_name: str,
     inp_path.write_text(inp_text)
 
     # 1) run hole
-    rc, out, err = await asyncio.to_thread(
-        run_in_env,
-        [env_bin("hole")],
-        cwd=str(work_dir),
-        input_text=inp_text,
-        timeout=300,
-    )
+    try:
+        rc, out, err = await asyncio.to_thread(
+            run_in_env,
+            [env_bin("hole")],
+            cwd=str(work_dir),
+            input_text=inp_text,
+            timeout=300,
+        )
+    except subprocess.TimeoutExpired:
+        raise HTTPException(
+            status_code=504,
+            detail="The HOLE binary timed out (>300 s) on this structure — "
+                   "it may be too large, or the parameters may send the "
+                   "Monte-Carlo search into open space. Try ignoring hydrogens/"
+                   "solvent residues or providing an explicit CPOINT.",
+        )
     (work_dir / "hole_out.txt").write_text(out + ("\n" + err if err else ""))
     if rc != 0 and "normal completion" not in out:
         # hole returns 0 on normal completion even with warnings
@@ -588,7 +636,68 @@ async def run_hole_pipeline(pdb_bytes: bytes, pdb_name: str,
             files=files, log_tail=out[-3000:], returncode=rc, error=err[-1500:] or "HOLE failed",
         )
 
-    profile = parse_hole_stdout(out)
+    # Parse the stdout. NOTE: hole.f prints " HOLE: normal completion" on
+    # EVERY exit path (including fatal errors), so a zero return code does
+    # NOT imply a pore was found. parse_hole_stdout + the checks below look
+    # at the actual content (profile samples, ERROR lines, the 99999
+    # no-pore sentinel) instead of trusting rc.
+    profile = await asyncio.to_thread(parse_hole_stdout, out)
+    error_lines = [ln.strip() for ln in _ERROR_LINES.findall(out)][:10]
+    m_dir = _BEST_DIRECTION.search(out)
+    cguess_direction = ({"1": "X", "2": "Y", "3": "Z"}.get(m_dir.group(1))
+                        if m_dir else None)
+
+    # -- Detect the "no pore traced" failure mode --------------------------
+    # HOLE can exit cleanly (rc=0, "normal completion") yet fail to trace
+    # any pore: 0 profile samples + the 99999 sentinel minimum radius. This
+    # happens e.g. for large multi-domain channels (TRPM8 9PB6) where the
+    # auto-guess picks the wrong axis or a vestibule wider than endrad
+    # satisfies the end condition immediately. Surface an actionable error
+    # instead of silently returning an empty profile.
+    no_pore = (profile.n_samples == 0)
+    if no_pore:
+        hints: list[str] = [
+            "HOLE completed but could not trace a pore with the current parameters.",
+        ]
+        if error_lines:
+            hints.insert(1, "HOLE reported: " + "; ".join(error_lines[:3]))
+        elif cguess_direction:
+            hints.append(
+                f"The automatic guess (cguess) chose the channel direction "
+                f"{cguess_direction} — verify this matches the real pore axis; "
+                "for large multi-domain channels the guess is often wrong.")
+        if params.get("cpoint_x") is None and params.get("cvect_x") is None:
+            hints.append(
+                "Try providing an explicit Channel vector (CVECT) and Channel "
+                "centre point (CPOINT) — e.g. for a C4-symmetric tetramer the "
+                "pore runs through the symmetry axis.")
+        try:
+            endrad_val = float(params.get("endrad") or 5.0)
+        except (TypeError, ValueError):
+            endrad_val = 5.0
+        hints.append(
+            f"If the pore has a wide vestibule or central cavity, raise the end "
+            f"radius (currently {endrad_val:.1f} Å) above the cavity radius "
+            "(e.g. 20–25 Å) so the trace continues through it instead of "
+            "stopping at the first wide point.")
+        hints.append(
+            "Also consider ignoring solvent/ligand residues (HOH TIP WAT ...) "
+            "that may block the pore.")
+        return RunResult(
+            job_id=job_id, work_dir=str(work_dir),
+            profile=profile, spheres=[], surface={"triangles": [], "colors": []},
+            summary={
+                "status": "no_pore",
+                "returncode": rc,
+                "cguess_direction": cguess_direction,
+                "min_radius": None,
+                "n_samples": 0,
+            },
+            files=sorted(p.name for p in work_dir.iterdir()),
+            log_tail=out[-3000:], returncode=rc,
+            error="HOLE could not trace a pore — see warnings for suggested fixes.",
+            warnings=[" ".join(hints[:2]), *hints[2:]] if len(hints) > 2 else hints,
+        )
 
     # 2) run sph_process to make dot surface (.qpt) + .sos
     sph_path = work_dir / f"{sphpdb_name}.sph"
@@ -761,7 +870,13 @@ async def run_hole_pipeline(pdb_bytes: bytes, pdb_name: str,
         "g_macro": profile.g_macro,
         "n_spheres": len(all_spheres),
         "n_triangles": len(surface.get("triangles", [])),
+        "cguess_direction": cguess_direction,
     }
+    if len(all_spheres) > 5000 or len(surface.get("triangles", [])) > 20000:
+        sos_warning = (sos_warning or "") + (" " if sos_warning else "") + \
+            "Large result: the sphere/triangle payload sent to the 3D viewer " \
+            "was capped (5000 spheres / 20000 triangles); download the raw " \
+            "files for the full data."
 
     files = sorted(p.name for p in work_dir.iterdir())
     warnings = [w for w in [sos_warning] if w]
@@ -782,7 +897,7 @@ async def run_hole_pipeline(pdb_bytes: bytes, pdb_name: str,
 app = FastAPI(
     title="HOLE2 Web Service",
     description="Wraps the HOLE2 ion-channel pore-analysis suite behind a REST API.",
-    version="1.0.0",
+    version="1.1.0",
 )
 
 app.add_middleware(
@@ -792,6 +907,51 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Limit the number of HOLE pipelines running at once — each run spawns up
+# to 6 Fortran subprocesses and allocates large work arrays for big PDBs.
+_run_semaphore = asyncio.Semaphore(MAX_CONCURRENT_RUNS)
+
+
+async def _sweep_jobs() -> None:
+    """Delete job directories older than JOB_MAX_AGE_S (and stray files).
+
+    Runs once at startup and then every JOB_SWEEP_INTERVAL_S so /tmp does
+    not grow without bound (each job can hold a 50 MB PDB + outputs).
+    """
+    while True:
+        try:
+            import time
+            now = time.time()
+            for d in JOBS_DIR.iterdir():
+                try:
+                    if d.is_dir() and (now - d.stat().st_mtime) > JOB_MAX_AGE_S:
+                        shutil.rmtree(d, ignore_errors=True)
+                except OSError:
+                    pass
+        except Exception:  # pragma: no cover — sweeper must never crash
+            pass
+        await asyncio.sleep(JOB_SWEEP_INTERVAL_S)
+
+
+@app.on_event("startup")
+async def _start_background_tasks() -> None:
+    asyncio.create_task(_sweep_jobs())
+
+
+# Early rejection of oversized upload bodies (before the full body is read
+# into RAM) based on the Content-Length header. Belt-and-braces with the
+# post-read check in /api/run.
+@app.middleware("http")
+async def _reject_oversized_bodies(request, call_next):
+    cl = request.headers.get("content-length")
+    if cl and cl.isdigit() and int(cl) > MAX_UPLOAD_BYTES + MAX_RAD_BYTES + 1024 * 1024:
+        return JSONResponse(
+            {"detail": f"Request body too large (>{(MAX_UPLOAD_BYTES + MAX_RAD_BYTES) // (1024*1024)} MB). "
+                       "Upload a smaller structure or strip solvent/hydrogens."},
+            status_code=413,
+        )
+    return await call_next(request)
 
 
 @app.get("/api/health")
@@ -804,15 +964,71 @@ async def health():
     }
 
 
+_EXAMPLE_DESCRIPTIONS = {
+    "01_gramicidin_1grm": "Gramicidin A (1GRM) — narrow channel, single-file water wire. The classic HOLE demo.",
+    "02_choleratoxin_1chb": "Cholera toxin B pentamer (1CHB) — large pore, uses the Connolly probe.",
+    "03_maltoporin_1af6": "Maltoporin trimer (1AF6) — sugar channel with explicit CPOINT/CVECT overrides.",
+    "04_trpm8_9pb6": "Avian TRPM8 tetramer (9PB6, menthol-bound cryo-EM) — large multi-domain "
+                     "channel whose ~19 Å central cavity defeats the default endrad=5 and the "
+                     "cguess auto-direction; runs with explicit CVECT 0 0 1, CPOINT and endrad 22.",
+}
+
+# Recommended web-form parameters for each bundled example. The front-end
+# applies these when the user one-click loads the example.
+_EXAMPLE_PARAMS = {
+    "01_gramicidin_1grm": {
+        "endrad": "5.0", "ignore_residues": "", "shorto": "0", "dotden": "15",
+    },
+    "02_choleratoxin_1chb": {
+        "connolly": True, "ignore_residues": "HOH TIP WAT", "shorto": "0", "dotden": "5",
+    },
+    "03_maltoporin_1af6": {
+        "cvect_x": "0.0", "cvect_y": "0.0", "cvect_z": "1.0",
+        "cpoint_x": "-14.285", "cpoint_y": "47.809", "cpoint_z": "82.707",
+        "ignore_residues": "FRU GLC MG HOH", "shorto": "0", "dotden": "15",
+    },
+    # TRPM8 9PB6: the pore runs along the C4 symmetry axis (z) through the
+    # tetramer centre; endrad must exceed the ~19 Å central cavity so HOLE
+    # does not treat the cavity as an immediate pore "end".
+    "04_trpm8_9pb6": {
+        "cvect_x": "0.0", "cvect_y": "0.0", "cvect_z": "1.0",
+        "cpoint_x": "209.639", "cpoint_y": "209.636", "cpoint_z": "202.5",
+        "endrad": "22.0", "ignore_residues": "", "shorto": "0", "dotden": "15",
+    },
+}
+
+
+def _examples_root() -> Path:
+    """Repo-local examples ship with the service; fall back to a cloned
+    osmart/hole2 checkout for the original trio."""
+    if (LOCAL_EXAMPLES).exists() and any(LOCAL_EXAMPLES.iterdir()):
+        return LOCAL_EXAMPLES
+    return HOLE2_REPO_EXAMPLES
+
+
+def _example_dirs() -> list[Path]:
+    """All example directories, repo-local ones first, then any cloned
+    osmart/hole2 examples that are not shadowed by a repo-local dir with
+    the same name (so the original trio + TRPM8 all show up)."""
+    dirs: list[Path] = []
+    seen: set[str] = set()
+    for root in (LOCAL_EXAMPLES, HOLE2_REPO_EXAMPLES):
+        if not root.exists():
+            continue
+        for d in sorted(root.iterdir()):
+            if not d.is_dir() or d.name.startswith("000") or d.name in seen:
+                continue
+            seen.add(d.name)
+            dirs.append(d)
+    return dirs
+
+
 @app.get("/api/examples")
 async def list_examples():
-    """List the bundled example structures (gramicidin, cholera toxin, maltoporin)."""
+    """List the bundled example structures (gramicidin, cholera toxin,
+    maltoporin, TRPM8) together with their recommended parameters."""
     out: list[dict] = []
-    if not HOLE2_REPO_EXAMPLES.exists():
-        return {"examples": out}
-    for d in sorted(HOLE2_REPO_EXAMPLES.iterdir()):
-        if not d.is_dir() or d.name.startswith("000"):
-            continue
+    for d in _example_dirs():
         pdbs = sorted(d.glob("*.pdb"))
         inps = sorted(d.glob("*.inp"))
         out.append({
@@ -821,29 +1037,43 @@ async def list_examples():
             "pdb_files": [p.name for p in pdbs],
             "inp_files": [p.name for p in inps],
             "description": _EXAMPLE_DESCRIPTIONS.get(d.name, ""),
+            "params": _EXAMPLE_PARAMS.get(d.name, {}),
         })
     return {"examples": out}
 
 
-_EXAMPLE_DESCRIPTIONS = {
-    "01_gramicidin_1grm": "Gramicidin A (1GRM) — narrow channel, single-file water wire. The classic HOLE demo.",
-    "02_choleratoxin_1chb": "Cholera toxin B pentamer (1CHB) — large pore, uses the Connolly probe.",
-    "03_maltoporin_1af6": "Maltoporin trimer (1AF6) — sugar通道 with explicit CPOINT/CVECT overrides.",
-}
+def _safe_resolve(base: Path, *parts: str) -> Path | None:
+    """Resolve *parts under base, refusing anything that escapes base."""
+    p = base.joinpath(*parts).resolve()
+    try:
+        p.relative_to(base.resolve())
+    except ValueError:
+        return None
+    return p
 
 
 @app.get("/api/example/{example_id}/{pdb_name}")
 async def get_example_pdb(example_id: str, pdb_name: str):
     """Stream a bundled example PDB file (so the front-end can one-click load it)."""
-    # example_id like "01_gramicidin_1grm", pdb_name like "1grm_single.pdb"
-    d = HOLE2_REPO_EXAMPLES / example_id
-    p = d / pdb_name
-    if not p.exists():
-        # try prefix match (e.g. user passes "1grm_single")
-        cand = list(d.glob(f"{pdb_name}*"))
-        if cand:
-            p = cand[0]
-    if not p.exists():
+    # Validate both path components: no separators, no dots-only tricks.
+    if not SAFE_NAME_RE.fullmatch(example_id) or not SAFE_NAME_RE.fullmatch(pdb_name):
+        raise HTTPException(status_code=400, detail="Invalid example id or file name")
+    p: Path | None = None
+    for root in (LOCAL_EXAMPLES, HOLE2_REPO_EXAMPLES):
+        if not root.exists():
+            continue
+        cand = _safe_resolve(root, example_id, pdb_name)
+        if cand is None or not cand.is_file():
+            # try prefix match (e.g. user passes "1grm_single")
+            d = _safe_resolve(root, example_id)
+            if d is not None and d.is_dir():
+                cands = [c for c in d.glob(f"{re.escape(pdb_name)}*") if c.is_file()]
+                if cands:
+                    cand = cands[0]
+        if cand is not None and cand.is_file():
+            p = cand
+            break
+    if p is None:
         raise HTTPException(status_code=404, detail="Example file not found")
     return FileResponse(p, filename=p.name, media_type="chemical/x-pdb")
 
@@ -868,10 +1098,26 @@ async def run_hole(
     smooth_surface: str = Form("true"),
 ):
     """Run the full HOLE2 pipeline on the uploaded PDB file."""
+    # --- input validation (fail fast, before reading bodies) -----------------
+    if not SAFE_NAME_RE.fullmatch((sphpdb_name or "hole_out")):
+        raise HTTPException(status_code=400,
+            detail="sphpdb_name may only contain letters, digits, dot, dash, underscore")
+    if ignore_residues and not IGNORE_RE.fullmatch(ignore_residues):
+        raise HTTPException(status_code=400,
+            detail="ignore_residues may only contain letters, digits, spaces, dashes")
+    allowed_rad_sets = {p.stem for p in
+                        (Path(env_prefix()) / "share/hole2/rad").glob("*.rad")}
+    if not allowed_rad_sets and HOLE2_REPO_RAD.exists():
+        allowed_rad_sets = {p.stem for p in HOLE2_REPO_RAD.glob("*.rad")}
+    has_custom_rad = radius_file is not None and (radius_file.filename or "") != ""
+    if not has_custom_rad and radius_set not in allowed_rad_sets:
+        raise HTTPException(status_code=400,
+            detail=f"Unknown radius set '{radius_set}'. Allowed: {', '.join(sorted(allowed_rad_sets))}")
+
     pdb_bytes = await pdb_file.read()
     if not pdb_bytes:
         raise HTTPException(status_code=400, detail="Empty PDB file")
-    if len(pdb_bytes) > 50 * 1024 * 1024:
+    if len(pdb_bytes) > MAX_UPLOAD_BYTES:
         raise HTTPException(status_code=413, detail="PDB file too large (>50 MB)")
 
     def _f(v: Optional[str]):
@@ -895,6 +1141,9 @@ async def run_hole(
         "cpoint_x": _f(cpoint_x), "cpoint_y": _f(cpoint_y), "cpoint_z": _f(cpoint_z),
         "cvect_x": _f(cvect_x), "cvect_y": _f(cvect_y), "cvect_z": _f(cvect_z),
         "endrad": _f(endrad) or 5.0,
+        # NOTE: shorto >= 2 suppresses the per-sample profile lines the
+        # parser needs; we pass it through for power users, but the UI only
+        # offers 0-3 with a hint.
         "shorto": _i(shorto, 0),
         "connolly": connolly.lower() in ("1", "true", "yes", "on"),
         "ignore_residues": ignore_residues.strip(),
@@ -906,9 +1155,21 @@ async def run_hole(
     custom_rad = None
     if radius_file is not None:
         custom_rad = await radius_file.read()
+        if len(custom_rad) > MAX_RAD_BYTES:
+            raise HTTPException(status_code=413, detail="Radius file too large (>1 MB)")
 
-    result = await run_hole_pipeline(pdb_bytes, pdb_file.filename or "input.pdb",
-                                     params, custom_rad)
+    # Limit concurrent Fortran pipelines — each run spawns up to 6
+    # subprocesses and allocates large arrays for big structures.
+    try:
+        await asyncio.wait_for(_run_semaphore.acquire(), timeout=5.0)
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=429,
+            detail="Server busy — other HOLE2 runs are in progress. Try again shortly.")
+    try:
+        result = await run_hole_pipeline(pdb_bytes, pdb_file.filename or "input.pdb",
+                                         params, custom_rad)
+    finally:
+        _run_semaphore.release()
 
     return JSONResponse({
         "job_id": result.job_id,
@@ -934,13 +1195,18 @@ async def run_hole(
 @app.get("/api/download/{job_id}/{filename}")
 async def download_file(job_id: str, filename: str):
     """Stream a single raw output file produced by HOLE2."""
-    # Prevent path traversal
-    if "/" in filename or ".." in filename:
+    # Validate job_id (defends against path traversal like /api/download/../x)
+    # and the filename.
+    if not JOB_ID_RE.fullmatch(job_id):
+        raise HTTPException(status_code=400, detail="Invalid job_id")
+    if not SAFE_NAME_RE.fullmatch(filename):
         raise HTTPException(status_code=400, detail="Invalid filename")
     job_dir = JOBS_DIR / job_id
     if not job_dir.exists() or not job_dir.is_dir():
         raise HTTPException(status_code=404, detail="Unknown job_id")
-    target = job_dir / filename
+    target = (job_dir / filename).resolve()
+    if job_dir.resolve() not in target.parents:
+        raise HTTPException(status_code=400, detail="Invalid filename")
     if not target.exists() or not target.is_file():
         raise HTTPException(status_code=404, detail=f"File {filename} not found in job {job_id}")
     media = "application/octet-stream"
@@ -958,6 +1224,8 @@ async def download_file(job_id: str, filename: str):
 @app.get("/api/job/{job_id}/files")
 async def list_job_files(job_id: str):
     """List the raw output files available for a job (used by the download UI)."""
+    if not JOB_ID_RE.fullmatch(job_id):
+        raise HTTPException(status_code=400, detail="Invalid job_id")
     job_dir = JOBS_DIR / job_id
     if not job_dir.exists():
         raise HTTPException(status_code=404, detail="Unknown job_id")
@@ -966,6 +1234,42 @@ async def list_job_files(job_id: str):
         if p.is_file():
             files.append({"name": p.name, "size": p.stat().st_size})
     return {"job_id": job_id, "files": files}
+
+
+def _fetch_pdb_from_rcsb(pid: str) -> dict:
+    """Blocking RCSB fetch (run via asyncio.to_thread from the handler)."""
+    import urllib.request
+    urls = [
+        (f"https://files.rcsb.org/download/{pid}.pdb", "pdb"),
+        (f"https://files.rcsb.org/download/{pid}.cif", "cif"),
+    ]
+    last_err: str = ""
+    for url, fmt in urls:
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "hole2-web/1.0"})
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                # Cap the read at MAX_UPLOAD_BYTES — huge cryo-EM structures
+                # (some are >200 MB as CIF) would otherwise be fully buffered.
+                content = resp.read(MAX_UPLOAD_BYTES + 1)
+                if len(content) > MAX_UPLOAD_BYTES:
+                    last_err = (f"structure {pid} exceeds the {MAX_UPLOAD_BYTES // (1024*1024)} MB "
+                                "download cap — download it from RCSB and upload the file instead")
+                    continue
+                if len(content) < 100:
+                    last_err = f"Empty response from {url}"
+                    continue
+                return {
+                    "pdb_id": pid,
+                    "format": fmt,
+                    "filename": f"{pid}.{fmt}",
+                    "content": content.decode("utf-8", errors="replace"),
+                    "size": len(content),
+                }
+        except urllib.error.HTTPError as e:
+            last_err = f"HTTP {e.code} from RCSB: {e.reason}"
+        except Exception as e:
+            last_err = str(e)
+    raise HTTPException(status_code=404, detail=f"PDB ID '{pid}' not found at RCSB. {last_err}")
 
 
 @app.get("/api/pdb/{pdb_id}")
@@ -977,36 +1281,13 @@ async def fetch_pdb_id(pdb_id: str):
     structure without leaving the app.  We proxy through the service to
     avoid CORS restrictions in the browser.
     """
-    import urllib.request
     pid = pdb_id.strip().lower()
-    if len(pid) != 4 or not pid.isalnum():
-        raise HTTPException(status_code=400, detail="PDB ID must be 4 alphanumeric characters")
-    # Try PDB format first (more widely supported), fall back to mmCIF.
-    urls = [
-        (f"https://files.rcsb.org/download/{pid}.pdb", "pdb"),
-        (f"https://files.rcsb.org/download/{pid}.cif", "cif"),
-    ]
-    last_err: str = ""
-    for url, fmt in urls:
-        try:
-            req = urllib.request.Request(url, headers={"User-Agent": "hole2-web/1.0"})
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                content = resp.read()
-                if len(content) < 100:
-                    last_err = f"Empty response from {url}"
-                    continue
-                return JSONResponse({
-                    "pdb_id": pid,
-                    "format": fmt,
-                    "filename": f"{pid}.{fmt}",
-                    "content": content.decode("utf-8", errors="replace"),
-                    "size": len(content),
-                })
-        except urllib.error.HTTPError as e:
-            last_err = f"HTTP {e.code} from RCSB: {e.reason}"
-        except Exception as e:
-            last_err = str(e)
-    raise HTTPException(status_code=404, detail=f"PDB ID '{pid}' not found at RCSB. {last_err}")
+    if not re.fullmatch(r"[0-9a-z]{4}", pid):
+        raise HTTPException(status_code=400, detail="PDB ID must be exactly 4 alphanumeric characters")
+    # Run the blocking urllib call off the event loop so a slow RCSB does
+    # not stall every other endpoint for up to 30 s.
+    data = await asyncio.to_thread(_fetch_pdb_from_rcsb, pid)
+    return JSONResponse(data)
 
 
 @app.get("/api/job/{job_id}/zip")
@@ -1015,15 +1296,23 @@ async def download_job_zip(job_id: str):
     import io as _io
     import zipfile
     from fastapi.responses import StreamingResponse
+    if not JOB_ID_RE.fullmatch(job_id):
+        raise HTTPException(status_code=400, detail="Invalid job_id")
     job_dir = JOBS_DIR / job_id
     if not job_dir.exists() or not job_dir.is_dir():
         raise HTTPException(status_code=404, detail="Unknown job_id")
-    buf = _io.BytesIO()
-    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        for p in sorted(job_dir.iterdir()):
-            if p.is_file():
-                zf.write(p, arcname=p.name)
-    buf.seek(0)
+
+    def _build_zip() -> _io.BytesIO:
+        buf = _io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            for p in sorted(job_dir.iterdir()):
+                if p.is_file():
+                    zf.write(p, arcname=p.name)
+        buf.seek(0)
+        return buf
+
+    # Build the archive off the event loop — jobs can hold 50+ MB of output.
+    buf = await asyncio.to_thread(_build_zip)
     return StreamingResponse(
         buf,
         media_type="application/zip",

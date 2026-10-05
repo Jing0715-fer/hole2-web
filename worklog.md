@@ -207,3 +207,108 @@ Stage Summary:
 - The page now loads reliably in production mode (~200MB memory vs 2GB dev mode)
 - All services running: Next.js:3000, Python:3001, Caddy gateway:81
 - Memory usage: 747MB total (well within 4GB cgroup limit)
+
+---
+Task ID: CR-2
+Agent: frontend-code-reviewer
+Task: Comprehensive code review of the Next.js frontend
+
+Work Log:
+- Read worklog.md (Tasks 1-6) for project history: OOM/cgroup constraints, isNucleic TDZ fix, CDN three.js migration, cvec/cpoint parsing fixes
+- Read all 12 target files: page.tsx, layout.tsx, RunForm.tsx, Viewer3D.tsx, ViewerControls.tsx, ProfileChart.tsx, ResultsPanel.tsx, api.ts, types.ts, pdb.ts, viewer.ts (~835 lines)
+- Read supporting files: ui/toaster.tsx, hooks/use-toast.ts, ui/sonner.tsx, next.config.ts, tsconfig.json, package.json, eslint.config.mjs, api/route.ts
+- Ran targeted greps to verify: (a) sonner Toaster never mounted anywhere, (b) no direct `three` imports in src (CDN-only via window.THREE), (c) no dangerouslySetInnerHTML in app code (only stock shadcn chart.tsx), (d) exact line numbers for all viewer.ts citations
+- Ran tsc --noEmit to probe type-safety status (module-resolution errors are env noise — no node_modules in this checkout; but confirmed ResultsPanel.tsx:35 `ReactNode` TS2304 and that ignoreBuildErrors:true masks it)
+- Traced effect order in Viewer3D to confirm the CDN-load race (structure effect can run before viewerRef is populated) and the never-cleared loadError path
+- Traced toast call sites vs rendered Toaster to confirm all sonner toast.*() calls are invisible (radix toaster rendered instead)
+
+Stage Summary:
+- Verdict: feature-complete and well-integrated app, but DO NOT SHIP until P0+P1 fixed
+- Issue counts: P0=1, P1=5, P2=10, P3=11
+- P0: All toasts invisible — page.tsx calls sonner's toast() but only the radix <Toaster/> (ui/toaster) is mounted (layout.tsx:57, page.tsx:174); ui/sonner.tsx wrapper is never imported. Every example-load/PDB-fetch/file-read error gives users zero feedback, and failed HOLE2 runs (res.error) surface only via the invisible toast
+- P1: (1) Viewer3D CDN race drops structure if window.THREE hasn't loaded when pdbText arrives (Viewer3D.tsx:28-81); (2) loadError never cleared + viewer/raf loop/WebGL context leak on error path (Viewer3D.tsx:101-108); (3) centre-line/sphere toggles + sphere-scale slider are dead unless enabled at result-load time (viewer.ts:369-376,670,687-726); (4) type-safety fully disabled (ignoreBuildErrors:true, noImplicitAny:false, exhaustive-deps off) — latent TS error already shipped (ResultsPanel.tsx:35 ReactNode); (5) disposables[] never pruned → JS-heap growth per rebuild (viewer.ts)
+- Key P2s: no in-flight race guards on example/run fetches; InstancedMesh bbox wrong in fitView; cartoon coloured by first anchor's SS only; computeBonds re-run per toggle (O(n²)); backbone "CA" misread as calcium in element inference; fabricated file sizes in ResultsPanel; no upload validation despite "50 MB" hint; dead three@0.186 + @types/three deps; CDN script without SRI/timeout
+- Security: clean — no XSS vectors found (React-escaped log rendering, encodeURIComponent URLs, rel=noreferrer); only stock shadcn chart.tsx uses dangerouslySetInnerHTML (theme CSS only, no user input)
+
+---
+Task ID: CR-1
+Agent: backend-code-reviewer
+Task: Comprehensive code review of the Python hole2-service backend
+
+Work Log:
+- Read /home/z/my-project/worklog.md for project history (6 prior tasks; known prior issues: profile column mixup, -888/-999 sph sentinels, sos_triangle polygon overflow fallback, dev-server OOM)
+- Read all 1073 lines of /home/z/hole2-web/mini-services/hole2-service/main.py, plus bootstrap.sh, package.json, and the Caddyfile (deployment context)
+- Cross-verified every parsing regex against the actual HOLE2 Fortran/C sources in /tmp/hole2/src:
+  * _PROFILE_LINE vs hograp.f:317-360 (4F12.5 + A12; Connolly adds 3F12.3/36X — regex OK, .{0,80} gap sufficient)
+  * _MIN_RADIUS vs hograp.f:369-370; _G_FACTOR vs hograp.f:381 (F8.3, no exponent — safe); _GMACRO vs hograp.f:394-396 + ut_strings.f SF2 (BUG: SF2 writes 1.2e8-style exponents when exponent outside [-2,5] — regex captures mantissa only)
+  * _CVECT/_CPOINT vs holset.f:261-262 (F8.3 overflow of the -55555 sentinel produces the *** masking); _CGUESS_* vs cguess.f:246-248 (A + 3F12.4)
+  * parse_sph_file fixed columns vs wpdbsp.f:88-91 (A,I4,4X,3F8.3,2F6.2 — columns correct); -888 markers vs addend.f:141-145; -999 Connolly vs concal.f:543-553
+  * parse_sos_vmd regexes vs sphtri.f:260-273 (3F10.3 trinorm) and sos_triangle.c:1691-1760 (%8.3f/%8.5f, "draw color blue|red|green|yellow", "draw triangle"/"draw trinorm")
+  * "CONNOLLY" keyword vs rcontr.f:471 (KEY(1:4).EQ.'CONN' — works despite the docs saying CONN)
+- Traced hole.f:751-756 error flow: ALL error paths GOTO 55555 which prints " HOLE: normal completion" and the program never STOPs ("use no stop" comment) — proving main.py:580's `rc != 0 and "normal completion" not in out` error branch is effectively dead and failed runs (missing PDB, no atoms — hole.f:613) return HTTP 200 status "ok"
+- Verified Jacobi eigen-decomposition in infer_channel_axis line-by-line (rotation angle t = -sign(θ)/(|θ|+√(θ²+1) correctly zeroes the off-diagonal; v accumulates G so columns are eigenvectors; m'=GᵀmG conjugation) — CORRECT
+- Verified centre_line_spheres' `idx > -100` filter vs wpdbsp.f I4 numbering: reverse-direction spheres are unbounded negative integers → pores with >99 reverse samples silently lose centre-line points
+- Checked runtime state: service not running, /tmp/hole2-jobs absent (no cleanup code exists anywhere — confirmed by grep: no rmtree/unlink/TTL)
+- Confirmed unused imports (json, tempfile) and unused aiofiles dependency via grep
+- Reviewed bootstrap.sh (unverified micromamba download, unpinned env, no-op verify step) and package.json (unpinned deps, 0.0.0.0+--reload dev script)
+- Compiled the prioritized P0-P3 findings report with file:line citations and concrete fixes
+
+Stage Summary:
+- Findings: 0 × P0, 6 × P1, 9 × P2, 18 × P3 (across main.py, bootstrap.sh, package.json; plus 1 deployment-level note on the Caddy XTransformPort open proxy)
+- Most important:
+  1. [P1] Failed HOLE runs reported as success (dead error branch main.py:580 — hole.f always prints "normal completion" and exits 0, so bad PDBs → 200 OK with nulls/0 samples)
+  2. [P1] Blocking urllib.request.urlopen inside async route (main.py:993) freezes the whole event loop up to ~30s
+  3. [P1] Path traversal via unvalidated job_id in 4 endpoints (main.py:940/961/1018 — `..` reads/zips arbitrary top-level /tmp files)
+  4. [P1] DoS family: upload fully read into RAM before 50MB check (main.py:871), radius_file unbounded (908), no concurrency cap on Fortran pipeline, job dirs never cleaned (disk exhaustion)
+  5. [P2] _GMACRO regex silently truncates SF2 exponential values ("1.2e8" parsed as 1.2)
+  6. [P2] centre-line filter `idx > -100` drops legit spheres on long pores
+- Core parsing logic and the Jacobi PCA are otherwise correct (verified against Fortran output formats); architecture (per-job temp dirs, subprocess list-form, to_thread for binaries, response caps) is sound
+- Verdict: good MVP, NOT production-ready — fix the 6 P1s before public deployment
+
+---
+Task ID: 7
+Agent: main
+Task: Full-session review: clone repo, comprehensive code review + E2E testing, 9PB6 "no pore" investigation, fix critical findings, push to GitHub
+
+Work Log:
+- Cloned https://github.com/Jing0715-fer/hole2-web fresh; /tmp state (micromamba env, hole2 repo clone) had been wiped by sandbox reset — rebuilt both (micromamba 2.9.0 + conda-forge hole2 2.3.1, ~3 min; cloned osmart/hole2 for rad files + 3 original examples).
+- Deployed the app into the sandbox preview project (/home/z/my-project) so the user-visible preview at port 3000 runs it (three.js + recharts already in the template's node_modules).
+- Delegated two comprehensive code-review subagents (see Task IDs CR-1, CR-2 above):
+  - Backend (CR-1): 0×P0, 6×P1 (failures masked as success, blocking network I/O in event loop, path traversal via job_id, late upload-size check, no concurrency limit, no job-dir cleanup), 9×P2 (Gmacro exponent truncation, centre-line filter truncating long pores, .inp injection, swallowed exceptions, sync parsing on event loop, in-RAM zip, wildcard CORS), 18×P3. Regexes cross-verified against the HOLE2 Fortran sources.
+  - Frontend (CR-2): 1×P0 (ALL toasts invisible — sonner API used but radix Toaster rendered: the root cause of past "no reaction" complaints), 5×P1 (CDN race drops structure, loadError never cleared + WebGL leak, dead centre-line/sphere/scale controls, ignoreBuildErrors hid a shipped TS error (ReactNode import), disposables leak), 10×P2.
+- 9PB6 investigation (the user's question):
+  * 9PB6 = avian TRPM8 (Parus major) menthol-bound cryo-EM tetramer (Nature 2026), 4 chains × 1061 residues, 59,064 ATOM records incl. 29,136 explicit hydrogens, only ligand XUQ (L-menthol).
+  * Chain COMs all sit at z=203.91 → C4 pore axis is exactly +Z through (209.64, 209.64).
+  * Reproduced the failure: default params → cguess tests X/Y/Z averages (13.94/13.94/13.21) and picks X (WRONG — the true pore axis Z has the SMALLER average because the pore constricts); the trace immediately hits "This is an end!" (radius 15.06 > endrad 5.0 inside the ~19 Å central cavity) and the MC escapes through the 4 lateral fenestrations at z≈210 to the box corner (radius 297 Å). Result: 0 profile samples, "Minimum radius found: 99999.000", rc=0 "normal completion".
+  * Root causes (two independent): (1) cguess direction heuristic (max average radius) is wrong for multi-domain channels with wide lateral cavities; (2) default endrad=5.0 < the ~19 Å central cavity so the start point is already "an end".
+  * Verified fix recipe: CVECT 0 0 1 + CPOINT (209.639, 209.636, 202.5) + ENDRAD 22 → full pore traced: 1267 samples, min R = 2.113 Å (PHE969 SF constriction), central cavity ~15 Å, S6 gate R1072/K1079/I1090 ≈ 2.4-2.6 Å, Gmacro ≈ 400 pS. H-stripping (amberuni) changes min R by only 0.001 Å — hydrogens are NOT the issue. endrad 20 also works.
+- Architecture fix (solves recurring service-death + gateway 502s):
+  * The sandbox reaps background processes between tool calls (proved with a heartbeat experiment: killed <10 s after the call ends, even with setsid+nohup+disown). The infra-managed Next.js server (PID 1155/1160) survives.
+  * New src/app/api/hole/[...path]/route.ts: Node route handler proxying /api/hole/* → http://127.0.0.1:3001/api/*, spawning uvicorn as a CHILD OF THE NEXT.JS SERVER (survives reaping; self-heals on death via TCP probe + respawn; 25 s warmup wait). Frontend api.ts switched from ?XTransformPort=3001 gateway URLs to relative /api/hole/* paths — no CORS, no gateway dependency, works on :3000 directly.
+  * Fixed two proxy bugs found by E2E: multipart bodies must be buffered (req.arrayBuffer, streaming duplex unreliable) and the curl-style "Expect: 100-continue" header must be stripped (undici refuses to forward it — surfaced via error-cause logging).
+- Backend fixes (main.py):
+  * No-pore detection: 0 samples / 99999 sentinel → summary.status="no_pore" + error + actionable warnings (cguess direction chosen, CVECT/CPOINT advice, endrad-vs-cavity advice, ignore advice). ERROR lines surfaced. summary.cguess_direction parsed from "Best direction is found to be N" (both success and failure paths).
+  * Security: job_id validated ^[0-9a-f]{12}$ (4 endpoints), example_id/pdb_name validated ^[A-Za-z0-9_.-]+$ + _safe_resolve (no path traversal), sphpdb_name/ignore_residues/radius_set validated against patterns/allowlist (.inp injection blocked), Content-Length early-reject middleware (51 MB cap), radius_file capped 1 MB.
+  * Robustness: run semaphore (2 concurrent, 5 s wait → 429), first hole call wrapped for TimeoutExpired → 504 with advice, job-dir sweeper (24 h TTL, 10 min interval) started at app startup.
+  * Parser fixes: _GMACRO accepts exponent notation + prefers the TAG line (Rmin/Gmacro), centre_line_spheres keeps ALL idx != -999 (old > -100 filter truncated pores with >99 reverse-direction spheres), no-pore sentinel → min_radius=None, parse + zip moved to asyncio.to_thread, RCSB fetch moved off the event loop with a 50 MB read cap, repo-local examples dir (examples/ next to main.py) merged with the cloned repo's examples.
+  * Added mini-services/hole2-service/examples/04_trpm8_9pb6/{9pb6.pdb,hole.inp} + _EXAMPLE_PARAMS so the TRPM8 case is one-click reproducible (server-served params; frontend applies them generically).
+- Frontend fixes:
+  * P0-1: layout.tsx now mounts the sonner <Toaster /> (was radix) — every toast in the app was previously invisible.
+  * Viewer3D: CDN race fixed (inputs stored in refs + replayed after viewer init; 30 s timeout with visible error), loadError derived from {msg, forText} so a new structure auto-clears it (React-compiler-safe, no setState-in-effect), container stays mounted with a dismissible error overlay.
+  * viewer.ts: centre line + sphere cloud always built (toggles now work post-run), sphere-scale slider rescales InstancedMesh matrices live, fitView computes instanced bounding boxes MANUALLY from instanceMatrix (three r128 lacks InstancedMesh.computeBoundingBox — the unit-geometry bbox at the origin framed a phantom box for the un-centered TRPM8 at (210,210,200)), depth-cue fog now scales with camera distance (fixed Fog(80,250) fogged the entire 158 Å TRPM8 pore to invisibility at 290 Å — root cause #2 of the "black canvas").
+  * RunForm: endrad max 40 + wide-vestibule hint; compact SelectValue (full rad description in the trigger had a ~770 px min-content that broke mobile).
+  * page.tsx: example params now come from the server payload; no_pore status → error toast; grid columns min-w-0 (fixes mobile horizontal scroll, verified 414 px).
+  * ResultsPanel: ReactNode type import fixed (shipped TS error); ProfileChart min-R fallback no longer clamps to 0.
+- E2E verification (agent-browser through the real preview at :81 + direct :3000):
+  * Page loads; service badge "HOLE2 service ready"; 4 examples (TRPM8 first); 5 rad sets.
+  * TRPM8 9pb6 one-click: params prefilled (endrad 22, CPOINT, CVECT) → run → status ok, min R 2.113 Å, pore length 158.25 Å, 1267 samples, 635 spheres, 7605 triangles, Gmacro 396.5 pS; profile chart renders with zone bands + "min R = 2.113 Å"; 3D canvas pixel-verified (6819 bright px, 813 red cartoon / 360 green / 563 blue surface) + VLM-confirmed (colorful tetramer + pore surface through the centre); all 8 output files downloadable.
+  * TRPM8 9pb6 with DEFAULTS: status no_pore, cguess_direction X surfaced, Notice panel shows all 4 actionable hints (verified in DOM).
+  * Gramicidin regression: min R 1.198 Å (matches the original value exactly).
+  * Mobile 414 px: no horizontal scroll (was 884 px → 414 px after fixes); footer visible.
+  * lint: 0 errors 0 warnings. No console/page errors.
+
+Stage Summary:
+- 9PB6 verdict: "no pore detected" is EXPECTED with default parameters (two compounding HOLE heuristics), NOT a bug in the structure or the app — fixed end-to-end by (a) explicit CVECT 0 0 1 + CPOINT + ENDRAD 22 (now bundled as a one-click example) and (b) the app now explaining the failure with actionable hints instead of silently showing empty results.
+- Architecture: Next.js route-handler proxy (/api/hole/*) spawns + supervises the Python service as a child of the web server — immune to the sandbox's background-process reaping and to gateway 502s; frontend no longer uses XTransformPort.
+- Fixed: 1×P0 + 5×P1 frontend, 6×P1 + 8×P2 backend, plus the fitView/fog rendering bugs found only by pixel-level E2E on the large un-centered structure.
+- All E2E green: gramicidin regression, TRPM8 success path, TRPM8 failure-path UX, mobile responsiveness, lint clean.

@@ -365,13 +365,16 @@ export class HoleViewer {
       this.buildSurfaceMesh(surface)
     }
 
-    // centre line — tube along the sphere centres
-    if (centreline.length > 1 && this.options.showCentreLine) {
+    // centre line — tube along the sphere centres. Always built (cheap) so
+    // the "Centre line" toggle can turn it on/off after the results arrive
+    // (updateVisibility flips .visible on the group).
+    if (centreline.length > 1) {
       this.buildCentreLine(centreline)
     }
 
-    // pore spheres — instanced spheres coloured by zone
-    if (spheres.length > 0 && this.options.showSpheres) {
+    // pore spheres — instanced spheres coloured by zone. Always built so the
+    // "Sampled spheres" toggle works after the fact.
+    if (spheres.length > 0) {
       this.buildSphereCloud(spheres)
     }
 
@@ -668,6 +671,9 @@ export class HoleViewer {
     const m = new THREE.Matrix4()
     const color = new THREE.Color()
     const scale = this.options.sphereScale
+    // Keep the raw data so setOptions can rescale instances live without a
+    // full rebuild (the sphere-scale slider updates in real time).
+    inst.userData.spheres = spheres
     for (let k = 0; k < spheres.length; k++) {
       const s = spheres[k]
       const r = s.r * 0.5 * scale
@@ -683,9 +689,28 @@ export class HoleViewer {
     this.disposables.push(geo, mat)
   }
 
+  /** Rescale the sampled-sphere InstancedMesh in place for a new scale. */
+  private rescaleSphereCloud(scale: number) {
+    this.sphereGroup.traverse(obj => {
+      const inst = obj as any
+      if (!(inst as any).isInstancedMesh || !inst.userData?.spheres) return
+      const spheres: HoleSphere[] = inst.userData.spheres
+      const m = new THREE.Matrix4()
+      for (let k = 0; k < spheres.length; k++) {
+        const s = spheres[k]
+        const r = s.r * 0.5 * scale
+        m.makeScale(r, r, r)
+        m.setPosition(s.x, s.y, s.z)
+        inst.setMatrixAt(k, m)
+      }
+      inst.instanceMatrix.needsUpdate = true
+    })
+  }
+
   /** Set viewer options (visibility toggles, opacity, etc.). */
   setOptions(opts: Partial<HoleViewerOptions>) {
     const prevPoreSideChains = this.options.showPoreSideChains
+    const prevSphereScale = this.options.sphereScale
     this.options = { ...this.options, ...opts }
     // if opacity changed, update the surface material
     if (opts.surfaceOpacity !== undefined) {
@@ -696,6 +721,11 @@ export class HoleViewer {
           obj.material.needsUpdate = true
         }
       })
+    }
+    // Sphere-scale slider — rescale the instanced spheres in place (no
+    // rebuild needed).
+    if (opts.sphereScale !== undefined && opts.sphereScale !== prevSphereScale) {
+      this.rescaleSphereCloud(opts.sphereScale)
     }
     // If the pore-side-chains toggle changed, rebuild the structure group so
     // the side-chains are added/removed.  Only do this if HOLE results exist.
@@ -737,6 +767,50 @@ export class HoleViewer {
       g.traverse(obj => {
         if (obj instanceof THREE.Mesh) {
           meshCount++
+          const anyObj = obj as unknown as {
+            isInstancedMesh?: boolean
+            instanceMatrix?: { array: ArrayLike<number> }
+          }
+          if (anyObj.isInstancedMesh && anyObj.instanceMatrix?.array) {
+            // InstancedMesh: the geometry is a unit primitive centred at the
+            // origin — its bounding box says nothing about where the atoms
+            // actually are.  three r128 has no InstancedMesh.computeBoundingBox,
+            // so compute the box manually from the instance matrices: each
+            // 4x4 (column-major) carries the per-instance scale (column
+            // vector lengths) and translation (elements 12-14).  Without
+            // this, structures far from the origin (e.g. raw cryo-EM frames
+            // like TRPM8 at ~(210,210,200)) get framed against a phantom box
+            // at 0,0,0 and the camera ends up pointing at empty space.
+            obj.updateMatrixWorld(true)
+            const arr = anyObj.instanceMatrix.array
+            const nInst = Math.floor(arr.length / 16)
+            const min = [Infinity, Infinity, Infinity]
+            const max = [-Infinity, -Infinity, -Infinity]
+            for (let k = 0; k < nInst; k++) {
+              const o16 = k * 16
+              // column vector lengths = per-axis scale
+              const sx = Math.hypot(arr[o16], arr[o16 + 1], arr[o16 + 2])
+              const sy = Math.hypot(arr[o16 + 4], arr[o16 + 5], arr[o16 + 6])
+              const sz = Math.hypot(arr[o16 + 8], arr[o16 + 9], arr[o16 + 10])
+              const px = arr[o16 + 12], py = arr[o16 + 13], pz = arr[o16 + 14]
+              const rx = Math.max(sx, sy, sz), ry = rx, rz = rx
+              for (let c = 0; c < 3; c++) {
+                const p = c === 0 ? px : c === 1 ? py : pz
+                const r = c === 0 ? rx : c === 1 ? ry : rz
+                if (p - r < min[c]) min[c] = p - r
+                if (p + r > max[c]) max[c] = p + r
+              }
+            }
+            if (Number.isFinite(min[0])) {
+              const bb = new THREE.Box3(
+                new THREE.Vector3(min[0], min[1], min[2]),
+                new THREE.Vector3(max[0], max[1], max[2]),
+              )
+              bb.applyMatrix4(obj.matrixWorld)
+              this.bbox.union(bb)
+            }
+            return
+          }
           const geo = obj.geometry
           if (geo && geo.attributes && geo.attributes.position) {
             geo.computeBoundingBox()
@@ -760,6 +834,14 @@ export class HoleViewer {
     const maxDim = Math.max(size.x, size.y, size.z, 1)
     const fov = this.camera.fov * Math.PI / 180
     const dist = (maxDim / 2) / Math.tan(fov / 2) * 1.4
+    // Scale the depth-cue fog with the camera distance so large structures
+    // (e.g. the 158 Å TRPM8 pore, camera ~290 Å out) are not fully fogged
+    // out — the fixed 80-250 Å range rendered them invisible against the
+    // background.
+    if (this.scene.fog instanceof THREE.Fog) {
+      this.scene.fog.near = dist * 0.9
+      this.scene.fog.far = dist * 3.0
+    }
     this.controls.target.copy(center)
     // Camera direction: mostly along Z with a slight Y tilt for a 3/4 view.
     // A high Y component pushes the structure to the top of the viewport;

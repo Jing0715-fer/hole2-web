@@ -1,18 +1,17 @@
 /**
- * Front-end API client for the HOLE2 Python mini-service (port 3001).
+ * Front-end API client for the HOLE2 Python mini-service.
  *
- * All requests go through the Caddy gateway with the XTransformPort
- * query param so the relative paths work from the browser.
+ * All requests go through the Next.js route handler at /api/hole/* which
+ * proxies them to the Python service on 127.0.0.1:3001 (and auto-starts
+ * it if it is not running). This works from any origin without CORS or
+ * gateway port-forwarding.
  */
 
-import type { RunParams, RunResult, OutputFile } from './types'
-
-const SERVICE_PORT = 3001
+import type { RunParams, RunResult } from './types'
 
 function apiUrl(path: string) {
-  // Route through Caddy (port 81) with the XTransformPort query
-  const sep = path.includes('?') ? '&' : '?'
-  return `${path}${sep}XTransformPort=${SERVICE_PORT}`
+  // Path looks like "/api/health" -> "/api/hole/health" (proxied by Next.js)
+  return path.replace(/^\/api\//, '/api/hole/')
 }
 
 export interface RadSetInfo {
