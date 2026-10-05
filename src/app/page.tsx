@@ -229,7 +229,7 @@ export default function Home() {
       <header className="sticky top-0 z-30 border-b border-slate-200/60 bg-white/70 backdrop-blur-xl dark:border-slate-800/60 dark:bg-slate-950/70">
         <div className="mx-auto flex h-16 max-w-[1600px] items-center justify-between gap-4 px-6">
           <div className="flex min-w-0 items-center gap-3">
-            <div className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-emerald-400 via-teal-500 to-cyan-600 text-white shadow-lg shadow-emerald-500/20">
+            <div className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-emerald-600 text-white shadow-sm">
               <Boxes className="size-5" />
             </div>
             <div className="min-w-0">
@@ -255,19 +255,14 @@ export default function Home() {
 
       {/* Main content */}
       <main className="mx-auto w-full max-w-[1600px] flex-1 px-6 py-8">
-        {/* Hero — refined with gradient text */}
+        {/* Hero */}
         <section className="mb-8">
           <div className="flex items-center gap-3 mb-3">
-            <Badge className="bg-gradient-to-r from-emerald-600 to-teal-600 text-white shadow-sm">HOLE2 2.3.1</Badge>
-            <span className="text-xs text-muted-foreground">Smart, Goodfellow & Wallace, 1996</span>
+            <Badge variant="secondary" className="font-mono text-xs">HOLE2 2.3.1</Badge>
+            <span className="text-xs text-muted-foreground/70">Smart, Goodfellow & Wallace, 1996</span>
           </div>
           <h2 className="text-3xl font-bold tracking-tight sm:text-4xl">
-            <span className="bg-gradient-to-r from-slate-900 via-slate-800 to-slate-700 bg-clip-text text-transparent dark:from-white dark:via-slate-200 dark:to-slate-400">
-              Analyse the pore dimensions of
-            </span>{' '}
-            <span className="bg-gradient-to-r from-emerald-600 to-teal-600 bg-clip-text text-transparent">
-              ion channels
-            </span>
+            Analyse the pore dimensions of ion channels
           </h2>
           <p className="mt-3 max-w-2xl text-sm text-muted-foreground">
             Upload a structure, configure the pore probe, and HOLE2 computes the maximum-radius sphere

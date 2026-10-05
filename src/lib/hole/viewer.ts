@@ -120,7 +120,9 @@ class SimpleOrbitControls {
       this.spherical.theta += this.sphericalDelta.theta
       this.spherical.phi += this.sphericalDelta.phi
     }
-    this.spherical.phi = Math.max(0.01, Math.min(Math.PI - 0.01, this.spherical.phi))
+    // No phi clamping — allow full 360° vertical rotation (flip over the poles).
+    // The previous clamp Math.max(0.01, Math.min(Math.PI - 0.01, phi)) prevented
+    // the camera from going above/below the structure.
     this.spherical.radius *= this.scale
     this.spherical.radius = Math.max(0.1, this.spherical.radius)
     this.target.add(this.panOffset)
@@ -323,7 +325,7 @@ export class HoleViewer {
 
     // 3) pore-lining side chains (only if HOLE results are already loaded)
     if (this.options.showPoreSideChains && this.currentCentreline.length > 0) {
-      this.buildPoreSideChains(s, this.currentCentreline)
+      this.buildPoreSideChains(s, this.currentCentreline, 6.0, chainColorMap)
     }
 
     this.updateVisibility()
@@ -357,7 +359,7 @@ export class HoleViewer {
       }
       if (this.options.showCartoon) this.buildCartoon(s, chainColorMap)
       if (this.options.showBallStick) this.buildBallStick(s)
-      this.buildPoreSideChains(s, centreline)
+      this.buildPoreSideChains(s, centreline, 6.0, chainColorMap)
     }
 
     // surface mesh — flat shaded so each triangle's vertex colour shows
@@ -462,7 +464,8 @@ export class HoleViewer {
 
   /** Build side-chain sticks for residues whose CA is within `cutoff` Å of
    *  any pore centre-line sphere.  This shows the pore-lining residues. */
-  buildPoreSideChains(s: PdbStructure, centreline: [number, number, number][], cutoff = 6.0) {
+  buildPoreSideChains(s: PdbStructure, centreline: [number, number, number][], cutoff = 6.0,
+                       chainColorMap?: Map<string, number>) {
     if (centreline.length === 0) return
     // Build a spatial hash of centre-line points for fast proximity queries
     const cellSize = cutoff * 1.5
@@ -513,9 +516,99 @@ export class HoleViewer {
       }
     }
     if (atomIdx.length === 0) return
-    // Build the side-chain sticks (cylinders for bonds, spheres for atoms)
-    this.buildSticksForAtoms(s, atomIdx, 0.12)
-    this.buildSpheresForAtoms(s, atomIdx, 0.18)
+
+    // Build a per-atom color array where carbon atoms get the chain color
+    // (not grey CPK) and other atoms keep their CPK colors.
+    const sideChainColors = new Float32Array(s.atoms.length * 3)
+    for (let i = 0; i < s.atoms.length; i++) {
+      const a = s.atoms[i]
+      if (a.element === 'C' && chainColorMap) {
+        // Carbon → chain color
+        const col = chainColorMap.get(a.chainId) ?? 0x808080
+        const c = new THREE.Color(col)
+        sideChainColors[i * 3] = c.r
+        sideChainColors[i * 3 + 1] = c.g
+        sideChainColors[i * 3 + 2] = c.b
+      } else {
+        // Other atoms → CPK
+        sideChainColors[i * 3] = this.atomColors[i * 3]
+        sideChainColors[i * 3 + 1] = this.atomColors[i * 3 + 1]
+        sideChainColors[i * 3 + 2] = this.atomColors[i * 3 + 2]
+      }
+    }
+    // Build sticks + spheres with the side-chain-specific colors
+    this.buildSticksForAtomsColored(s, atomIdx, 0.12, sideChainColors)
+    this.buildSpheresForAtomsColored(s, atomIdx, 0.18, sideChainColors)
+  }
+
+  /** Build stick cylinders for a set of atoms, using a custom color array. */
+  private buildSticksForAtomsColored(s: PdbStructure, atomIdx: number[], stickRadius: number,
+                                       customColors: Float32Array) {
+    const bonds = computeBonds(s)
+    if (bonds.length === 0) return
+    const atomSet = new Set(atomIdx)
+    const relevant = bonds.filter(([a, b]) => atomSet.has(a) && atomSet.has(b))
+    if (relevant.length === 0) return
+    const cylGeo = new THREE.CylinderGeometry(stickRadius, stickRadius, 1, 8, 1, true)
+    const cylMat = new THREE.MeshStandardMaterial({ roughness: 0.4, metalness: 0.0 })
+    const inst = new THREE.InstancedMesh(cylGeo, cylMat, relevant.length * 2)
+    const m = new THREE.Matrix4()
+    const color = new THREE.Color()
+    const up = new THREE.Vector3(0, 1, 0)
+    const a = new THREE.Vector3()
+    const b = new THREE.Vector3()
+    const mid = new THREE.Vector3()
+    const quat = new THREE.Quaternion()
+    for (let k = 0; k < relevant.length; k++) {
+      const [i, j] = relevant[k]
+      const ai = s.atoms[i], aj = s.atoms[j]
+      a.set(ai.x, ai.y, ai.z)
+      b.set(aj.x, aj.y, aj.z)
+      mid.copy(a).lerp(b, 0.5)
+      const half = a.clone().lerp(mid, 0.5)
+      const len = a.distanceTo(mid)
+      const dir = mid.clone().sub(a).normalize()
+      quat.setFromUnitVectors(up, dir)
+      m.compose(half, quat, new THREE.Vector3(1, len, 1))
+      inst.setMatrixAt(k * 2, m)
+      color.setRGB(customColors[i * 3], customColors[i * 3 + 1], customColors[i * 3 + 2])
+      inst.setColorAt(k * 2, color)
+      const half2 = mid.clone().lerp(b, 0.5)
+      const len2 = mid.distanceTo(b)
+      const dir2 = b.clone().sub(mid).normalize()
+      quat.setFromUnitVectors(up, dir2)
+      m.compose(half2, quat, new THREE.Vector3(1, len2, 1))
+      inst.setMatrixAt(k * 2 + 1, m)
+      color.setRGB(customColors[j * 3], customColors[j * 3 + 1], customColors[j * 3 + 2])
+      inst.setColorAt(k * 2 + 1, color)
+    }
+    inst.instanceMatrix.needsUpdate = true
+    if (inst.instanceColor) inst.instanceColor.needsUpdate = true
+    this.structureGroup.add(inst)
+    this.disposables.push(cylGeo, cylMat)
+  }
+
+  /** Build spheres for a set of atoms, using a custom color array. */
+  private buildSpheresForAtomsColored(s: PdbStructure, atomIdx: number[], radius: number,
+                                        customColors: Float32Array) {
+    const sphereGeo = new THREE.SphereGeometry(1, 16, 12)
+    const sphereMat = new THREE.MeshStandardMaterial({ roughness: 0.35, metalness: 0.05 })
+    const inst = new THREE.InstancedMesh(sphereGeo, sphereMat, atomIdx.length)
+    const m = new THREE.Matrix4()
+    const color = new THREE.Color()
+    for (let k = 0; k < atomIdx.length; k++) {
+      const i = atomIdx[k]
+      const a = s.atoms[i]
+      m.makeScale(radius, radius, radius)
+      m.setPosition(a.x, a.y, a.z)
+      inst.setMatrixAt(k, m)
+      color.setRGB(customColors[i * 3], customColors[i * 3 + 1], customColors[i * 3 + 2])
+      inst.setColorAt(k, color)
+    }
+    inst.instanceMatrix.needsUpdate = true
+    if (inst.instanceColor) inst.instanceColor.needsUpdate = true
+    this.structureGroup.add(inst)
+    this.disposables.push(sphereGeo, sphereMat)
   }
 
   /** Build stick cylinders + spheres for a specific set of atom indices. */
@@ -744,7 +837,7 @@ export class HoleViewer {
       }
       if (this.options.showCartoon) this.buildCartoon(s, chainColorMap)
       if (this.options.showBallStick) this.buildBallStick(s)
-      if (this.options.showPoreSideChains) this.buildPoreSideChains(s, this.currentCentreline)
+      if (this.options.showPoreSideChains) this.buildPoreSideChains(s, this.currentCentreline, 6.0, chainColorMap)
     }
     this.updateVisibility()
   }
