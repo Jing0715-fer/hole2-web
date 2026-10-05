@@ -188,28 +188,25 @@ export function RunForm(props: RunFormProps) {
           </div>
         )}
 
-        {/* Radius set + endrad */}
-        <div className="grid grid-cols-2 gap-3">
+        {/* Radius set + endrad — stacked vertically to avoid width overflow */}
+        <div className="space-y-3">
           <div className="space-y-1.5">
             <Label htmlFor="radius-set" className="text-xs font-medium">vdW radius set</Label>
             <Select value={params.radius_set} onValueChange={(v) => set({ radius_set: v })}>
-              <SelectTrigger id="radius-set" className="h-9">
+              <SelectTrigger id="radius-set" className="h-9 w-full">
                 <SelectValue />
               </SelectTrigger>
-              <SelectContent>
+              <SelectContent className="max-w-[340px]">
                 {radSets.rad_sets.map((r) => (
-                  <SelectItem key={r.name} value={r.name}>
-                    <div className="flex flex-col">
-                      <span className="font-mono">{r.name}.rad</span>
-                      <span className="text-[10px] text-muted-foreground">{r.description}</span>
+                  <SelectItem key={r.name} value={r.name} className="py-2">
+                    <div className="flex flex-col gap-0.5">
+                      <span className="font-mono text-xs">{r.name}.rad</span>
+                      <span className="text-[10px] leading-tight text-muted-foreground">{r.description}</span>
                     </div>
                   </SelectItem>
                 ))}
               </SelectContent>
             </Select>
-            <p className="text-[10px] leading-snug text-muted-foreground">
-              {radSets.rad_sets.find(r => r.name === params.radius_set)?.description ?? 'Pick a radius set'}
-            </p>
           </div>
           <div className="space-y-1.5">
             <Label htmlFor="endrad" className="text-xs font-medium">End radius (Å)</Label>

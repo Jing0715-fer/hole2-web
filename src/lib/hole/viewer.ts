@@ -148,7 +148,7 @@ class SimpleOrbitControls {
 
 import {
   parsePDB, parseStructure, computeBonds, elementInfo, isProtein, isNucleic, isWater,
-  centerStructure, geometricCentre, type PdbStructure,
+  type PdbStructure,
 } from './pdb'
 import {
   poreZoneColor, vmdColorToHex,
@@ -278,16 +278,16 @@ export class HoleViewer {
 
   /** Load a PDB/CIF structure (text) and render cartoon + ball-and-stick.
    *  Auto-detects the format (PDB vs mmCIF) by sniffing the file header.
-   *  The structure is centred on its geometric centroid so the pore is
-   *  roughly in view (the HOLE cpoint may shift this further once loaded). */
+   *  The structure stays in its original coordinates so the HOLE surface
+   *  (computed in the same frame) aligns perfectly.  fitView() frames it. */
   loadStructure(text: string, filename?: string) {
     // dispose existing structure
     this.clearGroup(this.structureGroup)
-    let parsed = parseStructure(text, filename)
-    // Center the structure on its geometric centroid so it sits in view.
-    // (Once HOLE results arrive, we re-centre on the pore cpoint.)
-    const gc = geometricCentre(parsed)
-    parsed = centerStructure(parsed, gc)
+    const parsed = parseStructure(text, filename)
+    // Do NOT center the structure — the HOLE surface + centre line are
+    // computed in the same coordinate system as the PDB, so keeping the
+    // structure in its original coordinates ensures the surface aligns
+    // perfectly.  fitView() will frame whatever is in the scene.
     this.structure = parsed
     this.currentStructure = parsed
     const s = this.structure
