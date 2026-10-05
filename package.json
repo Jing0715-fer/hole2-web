@@ -3,7 +3,7 @@
   "version": "0.2.1",
   "private": true,
   "scripts": {
-    "dev": "next dev -p 3000 2>&1 | tee dev.log",
+    "dev": "next start -p 3000 2>&1 | tee dev.log",
     "build": "next build",
     "start": "next start -p 3000 2>&1 | tee server.log",
     "lint": "eslint .",
