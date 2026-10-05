@@ -193,7 +193,7 @@ export class HoleViewer {
     showSpheres: false,
     showCentreLine: true,
     showPoreSideChains: true,  // highlight the pore-lining residues
-    surfaceOpacity: 0.9,
+    surfaceOpacity: 1.0,
     sphereScale: 1.0,
   }
   // atom colour array for ball-stick (CPK)
@@ -640,7 +640,7 @@ export class HoleViewer {
       side: THREE.DoubleSide,
       transparent: this.options.surfaceOpacity < 1.0,
       opacity: this.options.surfaceOpacity,
-      flatShading: false,
+      flatShading: true,  // recompute normals from geometry — fixes inward-facing normals from vmd_plot
       depthWrite: true,
     })
     const mesh = new THREE.Mesh(geo, mat)

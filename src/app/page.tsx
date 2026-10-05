@@ -49,7 +49,7 @@ export default function Home() {
     showSpheres: false,
     showCentreLine: true,
     showPoreSideChains: true,
-    surfaceOpacity: 0.85,
+    surfaceOpacity: 1.0,
     sphereScale: 1.0,
   })
   const viewerRef = useRef<{ capturePNG: () => string } | null>(null)
