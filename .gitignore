@@ -65,3 +65,4 @@ dev.pid
 *.zbak
 __pycache__/
 mini-services/hole2-service/.venv
+tool-results/
