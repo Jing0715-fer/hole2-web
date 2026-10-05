@@ -185,3 +185,25 @@ Stage Summary:
   4. "upload结构报错Application error" → fixed the isNucleic TDZ bug + CDN three.js loading
 - Root cause was the dev server being OOM-killed by the 4 GB cgroup limit when compiling three.js
 - Solution: CDN three.js + production build mode = ~700 MB total (well within 4 GB limit)
+
+---
+Task ID: 6
+Agent: main
+Task: Fix OOM crash — next.config.ts standalone issue + setsid process survival
+
+Work Log:
+- Discovered the TRUE root cause: next.config.ts STILL had "output: standalone"
+  despite previous commits claiming to remove it. This caused "next start" to
+  print a warning and fall back to dev mode, which uses Turbopack (2GB+ memory).
+- Force-rewrote next.config.ts with Write tool to ensure standalone is removed.
+- Changed package.json "dev" script from "next dev" to "next start" (production).
+- Discovered that background processes started with nohup were being killed when
+  the bash tool session ended. Solution: use setsid to detach from session group.
+- Created start-servers.sh that uses setsid to start both Python + Next.js.
+- Verified: page loads (52KB HTML), all API endpoints work (5 rad sets, 3 examples),
+  structure renders, HOLE2 runs, results show.
+
+Stage Summary:
+- The page now loads reliably in production mode (~200MB memory vs 2GB dev mode)
+- All services running: Next.js:3000, Python:3001, Caddy gateway:81
+- Memory usage: 747MB total (well within 4GB cgroup limit)
