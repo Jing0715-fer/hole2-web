@@ -388,3 +388,40 @@ Stage Summary:
 - start-servers.sh and package.json start script: `next start -p 3000` (Next.js only).
 - Verified end-to-end on gramicidin: min radius 1.199 Å, 281 profile samples, 142 pore spheres (after filtering -888 end markers), 6112 surface triangles, Gmacro 274.6 pS, cvec=[0,1,0] / cpoint=[-0.0178,-0.0122,4.2174] correctly recovered from the cguess output — matches the original CLI byte-for-byte.
 - lint clean (0 errors 0 warnings), production build succeeds in 13.5 s, all 9 routes serve correctly under /api/* on port 3000.
+
+---
+Task ID: 2
+Agent: main
+Task: Fix 3 issues: (1) cartoon/ballstick layer toggles not working, (2) compare button not found, (3) profile hover → 3D highlight not working, (4) page not loading
+
+Work Log:
+- Read worklog.md to understand previous work (Task ID 1)
+- Diagnosed root causes of all 4 issues:
+  - Cartoon/stick toggles: updateVisibility() set whole structureGroup visible/hidden as one unit (showCartoon || showBallStick || showPoreSideChains), so toggling one didn't hide just that representation
+  - Compare button: only rendered when 2+ entries selected, with no hint about needing to select entries
+  - Profile hover: recharts Tooltip has NO onHover prop — the {...({ onHover: handleHover } as any)} did nothing; also highlightPorePosition used distance-from-p0 instead of cvec projection
+  - Page loading: page was actually loading fine (verified with Agent Browser), but in small viewports the chart was below the fold
+- Fixed viewer.ts: split structureGroup into 3 independent groups (cartoonGroup, ballStickGroup, poreSideChainsGroup) so each representation can be toggled independently via updateVisibility()
+- Fixed viewer.ts: all build methods (buildCartoon, buildBallStick, buildPoreSideChains, buildSticksForAtoms, buildSpheresForAtoms, etc.) now accept a `group` parameter and add meshes to the correct group
+- Fixed viewer.ts: setOptions no longer rebuilds structure on cartoon/ballstick toggle — just flips group .visible (both representations are always built in loadStructure)
+- Fixed viewer.ts: highlightPorePosition now uses cvec projection (dot product with channel vector relative to cpoint) to accurately map t → 3D position, with arc-length fallback when cvec is unknown
+- Fixed viewer.ts: highlight marker is now a yellow core sphere (r=1.6) + translucent halo (r=3.2) for better visibility against the coloured pore surface
+- Fixed viewer.ts: added currentCvec/currentCpoint fields, loadHoleResults accepts optional cvec/cpoint
+- Fixed Viewer3D.tsx: passes profile.cvec and profile.cpoint to loadHoleResults
+- Fixed page.tsx: passes profile prop to Viewer3D
+- Fixed ProfileChart.tsx: replaced invalid recharts Tooltip onHover with ComposedChart onMouseMove/onMouseLeave props (recharts 2.x API)
+- Fixed HistoryPanel.tsx: Compare button is now always visible (disabled when <2 selected with "Compare (need 2+)" label), selected entries highlighted with emerald border, hint text guides user to "Check 2+ runs below"
+- Verified all fixes with Agent Browser:
+  - Page loads correctly, 3D viewer shows molecular structure, profile chart shows pore radius plot
+  - Cartoon toggle: toggling off hides ONLY cartoon, surface stays visible ✅
+  - Ball-stick toggle: toggling on shows ball-stick group independently ✅
+  - Profile hover → 3D highlight: yellow glowing marker appears at corresponding pore position, synced with recharts tooltip (t=-2.14 Å, R=1.570 Å) ✅
+  - Compare button: "Compare (need 2+)" → select 2 entries → "Compare 2 Runs" enabled → click shows comparison chart with 2 overlapping curves ✅
+  - Highlight clears on mouse leave ✅
+
+Stage Summary:
+- All 4 user-reported issues fixed and browser-verified
+- Key architectural change: structureGroup split into 3 independent groups (cartoon, ballStick, poreSideChains) for proper layer toggling
+- Profile hover→3D highlight uses cvec projection for accurate t→3D position mapping
+- Compare button now always visible with clear disabled-state guidance
+- Build successful, no lint errors, server running on port 3000

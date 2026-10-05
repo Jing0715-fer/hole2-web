@@ -80,11 +80,23 @@ export function HistoryPanel({ entries, selectedIds, onToggleSelect, onRemove, o
           </CardTitle>
         </CardHeader>
         <CardContent className="pt-0">
+          {/* Hint text — guides the user to select 2+ runs for comparison */}
+          {selectedEntries.length < 2 && (
+            <p className="mb-2 rounded-md bg-muted/30 px-2 py-1.5 text-[10px] leading-tight text-muted-foreground">
+              {entries.length < 2
+                ? 'Run HOLE2 at least twice to compare profiles.'
+                : 'Check 2+ runs below to enable profile comparison.'}
+            </p>
+          )}
           <div className="max-h-40 space-y-1 overflow-y-auto pr-1">
             {entries.map((entry) => (
               <div
                 key={entry.id}
-                className="flex items-center gap-2 rounded-md border border-border/40 bg-muted/20 px-2 py-1.5"
+                className={`flex items-center gap-2 rounded-md border px-2 py-1.5 transition-colors ${
+                  selectedIds.has(entry.id)
+                    ? 'border-emerald-400/50 bg-emerald-50/50 dark:bg-emerald-950/20'
+                    : 'border-border/40 bg-muted/20'
+                }`}
               >
                 <Checkbox
                   checked={selectedIds.has(entry.id)}
@@ -107,31 +119,34 @@ export function HistoryPanel({ entries, selectedIds, onToggleSelect, onRemove, o
             ))}
           </div>
 
-          {/* Action buttons — always visible at bottom of the list */}
-          {selectedEntries.length >= 1 && (
-            <div className="mt-2 flex gap-2">
-              {selectedEntries.length >= 2 && (
-                <Button
-                  variant={showCompare ? 'default' : 'outline'}
-                  size="sm"
-                  className="h-7 flex-1 gap-1.5 text-xs"
-                  onClick={() => setShowCompare(!showCompare)}
-                >
-                  <GitCompare className="size-3" />
-                  {showCompare ? 'Hide Comparison' : `Compare ${selectedEntries.length} Runs`}
-                </Button>
-              )}
-              <Button
-                variant="outline"
-                size="sm"
-                className="h-7 gap-1.5 text-xs"
-                onClick={handleExport}
-              >
-                <Download className="size-3" />
-                Export TSV
-              </Button>
-            </div>
-          )}
+          {/* Action buttons — Compare is always visible; disabled until 2+ selected */}
+          <div className="mt-2 flex gap-2">
+            <Button
+              variant={showCompare ? 'default' : 'outline'}
+              size="sm"
+              className="h-7 flex-1 gap-1.5 text-xs"
+              disabled={selectedEntries.length < 2}
+              onClick={() => setShowCompare(!showCompare)}
+              title={selectedEntries.length < 2 ? 'Select 2+ runs to compare' : 'Toggle comparison chart'}
+            >
+              <GitCompare className="size-3" />
+              {selectedEntries.length < 2
+                ? `Compare (need 2+)`
+                : showCompare
+                  ? 'Hide Comparison'
+                  : `Compare ${selectedEntries.length} Run${selectedEntries.length > 1 ? 's' : ''}`}
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-7 gap-1.5 text-xs"
+              disabled={selectedEntries.length < 1}
+              onClick={handleExport}
+            >
+              <Download className="size-3" />
+              TSV
+            </Button>
+          </div>
         </CardContent>
       </Card>
 

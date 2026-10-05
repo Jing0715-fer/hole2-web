@@ -87,7 +87,12 @@ export class HoleViewer {
   private container: HTMLElement
   private disposables: Array<{ dispose: () => void }> = []
   private structure: PdbStructure | null = null
-  private structureGroup = new THREE.Group()
+  // Structure is split into 3 INDEPENDENT groups so each representation can
+  // be toggled on/off individually (previously they all lived in one group
+  // and updateVisibility could only show/hide the whole structure).
+  private cartoonGroup = new THREE.Group()
+  private ballStickGroup = new THREE.Group()
+  private poreSideChainsGroup = new THREE.Group()
   private surfaceGroup = new THREE.Group()
   private centreLineGroup = new THREE.Group()
   private sphereGroup = new THREE.Group()
@@ -107,6 +112,11 @@ export class HoleViewer {
   private currentStructure: PdbStructure | null = null
   // current centreline (kept so we can rebuild pore side-chains on option toggle)
   private currentCentreline: [number, number, number][] = []
+  // Channel vector + centre point from the HOLE profile — used by
+  // highlightPorePosition(t) to map the 1-D channel coordinate back to a 3D
+  // position on the centre line.
+  private currentCvec: [number, number, number] | null = null
+  private currentCpoint: [number, number, number] | null = null
   // bounding box of the structure + hole surface combined
   private bbox = new THREE.Box3()
   private axesHelper: THREE.AxesHelper | null = null
@@ -173,7 +183,9 @@ export class HoleViewer {
     back.position.set(0, -30, 20)
     this.scene.add(back)
 
-    this.scene.add(this.structureGroup)
+    this.scene.add(this.cartoonGroup)
+    this.scene.add(this.ballStickGroup)
+    this.scene.add(this.poreSideChainsGroup)
     this.scene.add(this.surfaceGroup)
     this.scene.add(this.centreLineGroup)
     this.scene.add(this.sphereGroup)
@@ -228,14 +240,18 @@ export class HoleViewer {
    *  The structure stays in its original coordinates so the HOLE surface
    *  (computed in the same frame) aligns perfectly.  fitView() frames it. */
   loadStructure(text: string, filename?: string) {
-    // dispose existing structure
-    this.clearGroup(this.structureGroup)
+    // dispose existing structure (all 3 representation groups)
+    this.clearGroup(this.cartoonGroup)
+    this.clearGroup(this.ballStickGroup)
+    this.clearGroup(this.poreSideChainsGroup)
     // ALSO clear old HOLE results (surface, centre line, spheres) so the
     // previous run's pore doesn't linger when a new structure is loaded.
     this.clearGroup(this.surfaceGroup)
     this.clearGroup(this.centreLineGroup)
     this.clearGroup(this.sphereGroup)
     this.currentCentreline = []
+    this.currentCvec = null
+    this.currentCpoint = null
 
     const parsed = parseStructure(text, filename)
     // Do NOT center the structure — the HOLE surface + centre line are
@@ -266,17 +282,15 @@ export class HoleViewer {
     }
 
     // 1) cartoon ribbons (protein) + nucleic backbone tubes
-    if (this.options.showCartoon) {
-      this.buildCartoon(s, chainColorMap)
-    }
+    //    Always build so the toggle can show it without a rebuild.
+    this.buildCartoon(s, chainColorMap)
 
-    // 2) ball-and-stick (hetero atoms + ligands; optionally all atoms)
-    if (this.options.showBallStick) {
-      this.buildBallStick(s)
-    }
+    // 2) ball-and-stick (hetero atoms + ligands)
+    //    Always build so the toggle works after the fact.
+    this.buildBallStick(s)
 
     // 3) pore-lining side chains (only if HOLE results are already loaded)
-    if (this.options.showPoreSideChains && this.currentCentreline.length > 0) {
+    if (this.currentCentreline.length > 0) {
       this.buildPoreSideChains(s, this.currentCentreline, 6.0, chainColorMap)
     }
 
@@ -287,19 +301,22 @@ export class HoleViewer {
     requestAnimationFrame(() => this.fitView())
   }
 
-  /** Load the HOLE surface mesh + centre line + spheres. */
+  /** Load the HOLE surface mesh + centre line + spheres.
+   *  Optionally accepts the profile's cvec/cpoint so highlightPorePosition(t)
+   *  can map the 1-D channel coordinate back to a 3D position. */
   loadHoleResults(spheres: HoleSphere[], surface: HoleSurface,
-                  centreline: [number, number, number][]) {
+                  centreline: [number, number, number][],
+                  cvec?: [number, number, number] | null,
+                  cpoint?: [number, number, number] | null) {
     this.clearGroup(this.surfaceGroup)
     this.clearGroup(this.centreLineGroup)
     this.clearGroup(this.sphereGroup)
-    // Also rebuild the structure group's side-chains since the centre line
-    // may have changed.  We keep a reference to the current structure.
     this.currentCentreline = centreline
-    if (this.currentStructure && this.options.showPoreSideChains && centreline.length > 0) {
-      // Re-render the whole structure so the side-chains pick up the new centre line
-      // (cheaper than tracking which side-chain atoms to add/remove)
-      this.clearGroup(this.structureGroup)
+    this.currentCvec = cvec ?? null
+    this.currentCpoint = cpoint ?? null
+    // Rebuild the pore side-chains now that the centre line is available.
+    if (this.currentStructure && centreline.length > 0) {
+      this.clearGroup(this.poreSideChainsGroup)
       const s = this.currentStructure
       const chainColorMap = new Map<string, number>()
       let chainIdx = 0
@@ -309,8 +326,6 @@ export class HoleViewer {
           chainIdx++
         }
       }
-      if (this.options.showCartoon) this.buildCartoon(s, chainColorMap)
-      if (this.options.showBallStick) this.buildBallStick(s)
       this.buildPoreSideChains(s, centreline, 6.0, chainColorMap)
     }
 
@@ -411,7 +426,7 @@ export class HoleViewer {
           color, roughness: 0.4, metalness: 0.05,
         })
         const mesh = new THREE.Mesh(tubeGeo, mat)
-        this.structureGroup.add(mesh)
+        this.cartoonGroup.add(mesh)
         this.disposables.push(tubeGeo, mat)
         // Add end-cap spheres at the tube termini so they look finished
         // (not cut off). This is especially important for multi-chain
@@ -423,8 +438,8 @@ export class HoleViewer {
         capStart.position.copy(seg[0])
         const capEnd = new THREE.Mesh(capGeo, capMat)
         capEnd.position.copy(seg[seg.length - 1])
-        this.structureGroup.add(capStart)
-        this.structureGroup.add(capEnd)
+        this.cartoonGroup.add(capStart)
+        this.cartoonGroup.add(capEnd)
         this.disposables.push(capGeo, capMat)
       }
     }
@@ -505,13 +520,13 @@ export class HoleViewer {
       }
     }
     // Build sticks + spheres with the side-chain-specific colors
-    this.buildSticksForAtomsColored(s, atomIdx, 0.12, sideChainColors)
-    this.buildSpheresForAtomsColored(s, atomIdx, 0.18, sideChainColors)
+    this.buildSticksForAtomsColored(s, atomIdx, 0.12, sideChainColors, this.poreSideChainsGroup)
+    this.buildSpheresForAtomsColored(s, atomIdx, 0.18, sideChainColors, this.poreSideChainsGroup)
   }
 
   /** Build stick cylinders for a set of atoms, using a custom color array. */
   private buildSticksForAtomsColored(s: PdbStructure, atomIdx: number[], stickRadius: number,
-                                       customColors: Float32Array) {
+                                       customColors: Float32Array, group: THREE.Group) {
     const bonds = computeBonds(s)
     if (bonds.length === 0) return
     const atomSet = new Set(atomIdx)
@@ -552,13 +567,13 @@ export class HoleViewer {
     }
     inst.instanceMatrix.needsUpdate = true
     if (inst.instanceColor) inst.instanceColor.needsUpdate = true
-    this.structureGroup.add(inst)
+    group.add(inst)
     this.disposables.push(cylGeo, cylMat)
   }
 
   /** Build spheres for a set of atoms, using a custom color array. */
   private buildSpheresForAtomsColored(s: PdbStructure, atomIdx: number[], radius: number,
-                                        customColors: Float32Array) {
+                                        customColors: Float32Array, group: THREE.Group) {
     const sphereGeo = new THREE.SphereGeometry(1, 16, 12)
     const sphereMat = new THREE.MeshStandardMaterial({ roughness: 0.35, metalness: 0.05 })
     const inst = new THREE.InstancedMesh(sphereGeo, sphereMat, atomIdx.length)
@@ -575,12 +590,12 @@ export class HoleViewer {
     }
     inst.instanceMatrix.needsUpdate = true
     if (inst.instanceColor) inst.instanceColor.needsUpdate = true
-    this.structureGroup.add(inst)
+    group.add(inst)
     this.disposables.push(sphereGeo, sphereMat)
   }
 
   /** Build stick cylinders + spheres for a specific set of atom indices. */
-  private buildSticksForAtoms(s: PdbStructure, atomIdx: number[], stickRadius: number) {
+  private buildSticksForAtoms(s: PdbStructure, atomIdx: number[], stickRadius: number, group: THREE.Group) {
     const bonds = computeBonds(s)
     if (bonds.length === 0) return
     const atomSet = new Set(atomIdx)
@@ -622,11 +637,11 @@ export class HoleViewer {
     }
     inst.instanceMatrix.needsUpdate = true
     if (inst.instanceColor) inst.instanceColor.needsUpdate = true
-    this.structureGroup.add(inst)
+    group.add(inst)
     this.disposables.push(cylGeo, cylMat)
   }
 
-  private buildSpheresForAtoms(s: PdbStructure, atomIdx: number[], radius: number) {
+  private buildSpheresForAtoms(s: PdbStructure, atomIdx: number[], radius: number, group: THREE.Group) {
     const sphereGeo = new THREE.SphereGeometry(1, 16, 12)
     const sphereMat = new THREE.MeshStandardMaterial({ roughness: 0.35, metalness: 0.05 })
     const inst = new THREE.InstancedMesh(sphereGeo, sphereMat, atomIdx.length)
@@ -644,7 +659,7 @@ export class HoleViewer {
     }
     inst.instanceMatrix.needsUpdate = true
     if (inst.instanceColor) inst.instanceColor.needsUpdate = true
-    this.structureGroup.add(inst)
+    group.add(inst)
     this.disposables.push(sphereGeo, sphereMat)
   }
 
@@ -658,8 +673,8 @@ export class HoleViewer {
       if (a.hetero && !isWater(a.resName)) atomIdx.push(i)
     }
     if (atomIdx.length === 0) return
-    this.buildSpheresForAtoms(s, atomIdx, 0.32)
-    this.buildSticksForAtoms(s, atomIdx, 0.1)
+    this.buildSpheresForAtoms(s, atomIdx, 0.32, this.ballStickGroup)
+    this.buildSticksForAtoms(s, atomIdx, 0.1, this.ballStickGroup)
   }
 
   private buildSurfaceMesh(surface: HoleSurface) {
@@ -789,29 +804,35 @@ export class HoleViewer {
     if (opts.sphereScale !== undefined && opts.sphereScale !== prevSphereScale) {
       this.rescaleSphereCloud(opts.sphereScale)
     }
-    // If the pore-side-chains toggle changed, rebuild the structure group so
-    // the side-chains are added/removed.  Only do this if HOLE results exist.
+    // If the pore-side-chains toggle changed, rebuild only that group so the
+    // side-chains are added/removed.  Only do this if HOLE results exist.
     if (opts.showPoreSideChains !== undefined && opts.showPoreSideChains !== prevPoreSideChains
         && this.currentStructure && this.currentCentreline.length > 0) {
-      this.clearGroup(this.structureGroup)
-      const s = this.currentStructure
-      const chainColorMap = new Map<string, number>()
-      let chainIdx = 0
-      for (const c of s.chains) {
-        if (!chainColorMap.has(c.id)) {
-          chainColorMap.set(c.id, CHAIN_COLORS[chainIdx % CHAIN_COLORS.length])
-          chainIdx++
+      this.clearGroup(this.poreSideChainsGroup)
+      if (this.options.showPoreSideChains) {
+        const s = this.currentStructure
+        const chainColorMap = new Map<string, number>()
+        let chainIdx = 0
+        for (const c of s.chains) {
+          if (!chainColorMap.has(c.id)) {
+            chainColorMap.set(c.id, CHAIN_COLORS[chainIdx % CHAIN_COLORS.length])
+            chainIdx++
+          }
         }
+        this.buildPoreSideChains(s, this.currentCentreline, 6.0, chainColorMap)
       }
-      if (this.options.showCartoon) this.buildCartoon(s, chainColorMap)
-      if (this.options.showBallStick) this.buildBallStick(s)
-      if (this.options.showPoreSideChains) this.buildPoreSideChains(s, this.currentCentreline, 6.0, chainColorMap)
     }
+    // Cartoon / ball-stick toggles now just flip group visibility — no
+    // rebuild needed because both representations are always built in
+    // loadStructure().
     this.updateVisibility()
   }
 
   private updateVisibility() {
-    this.structureGroup.visible = this.options.showCartoon || this.options.showBallStick || this.options.showPoreSideChains
+    // Each representation lives in its own group so toggles are independent.
+    this.cartoonGroup.visible = this.options.showCartoon
+    this.ballStickGroup.visible = this.options.showBallStick
+    this.poreSideChainsGroup.visible = this.options.showPoreSideChains
     this.surfaceGroup.visible = this.options.showSurface
     this.centreLineGroup.visible = this.options.showCentreLine
     this.sphereGroup.visible = this.options.showSpheres
@@ -823,7 +844,7 @@ export class HoleViewer {
     this.handleResize()
     this.bbox.makeEmpty()
     let meshCount = 0
-    for (const g of [this.structureGroup, this.surfaceGroup, this.centreLineGroup, this.sphereGroup]) {
+    for (const g of [this.cartoonGroup, this.ballStickGroup, this.poreSideChainsGroup, this.surfaceGroup, this.centreLineGroup, this.sphereGroup]) {
       if (!g.visible) continue
       g.updateMatrixWorld(true)
       g.traverse(obj => {
@@ -1055,7 +1076,7 @@ export class HoleViewer {
     raycaster.setFromCamera(ndc, this.camera)
 
     const meshes: THREE.Object3D[] = []
-    for (const g of [this.structureGroup, this.surfaceGroup, this.centreLineGroup, this.sphereGroup]) {
+    for (const g of [this.cartoonGroup, this.ballStickGroup, this.poreSideChainsGroup, this.surfaceGroup, this.centreLineGroup, this.sphereGroup]) {
       if (!g.visible) continue
       g.traverse(obj => {
         if (obj instanceof THREE.Mesh) meshes.push(obj)
@@ -1071,63 +1092,90 @@ export class HoleViewer {
   }
 
   /** Highlight a position on the pore centre line by t value (channel coordinate).
-   *  Creates/updates a glowing sphere marker at the nearest centre-line point. */
+   *  Creates/updates a glowing marker at the nearest centre-line point.
+   *
+   *  The profile's `t` is the dot product of the sphere centre with CVECT
+   *  (relative to CPOINT), so we project each centre-line point onto CVECT
+   *  and pick the one whose projection is closest to `t`.  When CVECT is
+   *  unknown we fall back to arc-length from the first point. */
   highlightPorePosition(t: number | null) {
     // Remove previous highlight
     if (this.highlightMarker) {
       this.scene.remove(this.highlightMarker)
-      this.highlightMarker.geometry?.dispose?.()
-      ;(this.highlightMarker.material as any)?.dispose?.()
+      this.highlightMarker.traverse((c: any) => {
+        c.geometry?.dispose?.()
+        if (Array.isArray(c.material)) c.material.forEach((m: any) => m.dispose?.())
+        else c.material?.dispose?.()
+      })
       this.highlightMarker = null
     }
     if (t === null) return
-    // Find the nearest centre-line point to this t value
     const cl = this.currentCentreline
-    if (!cl || cl.length === 0) return
-    // The centre line points are 3D positions. We need to find the one
-    // whose projection onto cvec matches t. Since we don't store cvec
-    // separately, we approximate by finding the point whose distance to
-    // the target position is smallest. The centreline is already sorted
-    // by t, so we can use binary search.
-    // For simplicity, find the point whose distance from the camera target
-    // along the dominant axis is closest to t.
-    // Actually, the centreline is sorted by cvec projection. We need cvec.
-    // Let's use the approach: find the point closest to the ray from
-    // target along cvec at distance t.
-    // Since we don't have cvec stored, approximate: find the closest point
-    // by brute-force search minimizing |dist_along_axis - t|.
-    // The centreline points are sorted, so we can pick the one whose
-    // distance from the first point matches t.
-    if (cl.length < 2) return
-    // Compute approximate t for each centreline point (distance from first point)
-    const p0 = cl[0]
+    if (!cl || cl.length < 2) return
+
+    const cvec = this.currentCvec
+    const cpoint = this.currentCpoint ?? [0, 0, 0]
+
     let bestIdx = 0
     let bestDist = Infinity
-    for (let i = 0; i < cl.length; i++) {
-      const dx = cl[i][0] - p0[0]
-      const dy = cl[i][1] - p0[1]
-      const dz = cl[i][2] - p0[2]
-      const dist = Math.sqrt(dx * dx + dy * dy + dz * dz)
-      const diff = Math.abs(dist - Math.abs(t))
-      if (diff < bestDist) {
-        bestDist = diff
-        bestIdx = i
+    if (cvec) {
+      // Precise mapping: project each centre-line point onto CVECT and
+      // compare to the target t (= (centre - cpoint) · cvec).
+      const [cvx, cvy, cvz] = cvec
+      const [cpx, cpy, cpz] = cpoint
+      for (let i = 0; i < cl.length; i++) {
+        const px = cl[i][0] - cpx
+        const py = cl[i][1] - cpy
+        const pz = cl[i][2] - cpz
+        const proj = px * cvx + py * cvy + pz * cvz
+        const diff = Math.abs(proj - t)
+        if (diff < bestDist) {
+          bestDist = diff
+          bestIdx = i
+        }
+      }
+    } else {
+      // Fallback: arc-length from the first point (less accurate when
+      // the pore is curved, but works when cvec was not passed in).
+      let acc = 0
+      for (let i = 0; i < cl.length; i++) {
+        if (i > 0) {
+          const dx = cl[i][0] - cl[i - 1][0]
+          const dy = cl[i][1] - cl[i - 1][1]
+          const dz = cl[i][2] - cl[i - 1][2]
+          acc += Math.sqrt(dx * dx + dy * dy + dz * dz)
+        }
+        const diff = Math.abs(acc - Math.abs(t))
+        if (diff < bestDist) {
+          bestDist = diff
+          bestIdx = i
+        }
       }
     }
-    // Create a glowing sphere at the highlight position
+
+    // Create a glowing marker — a bright yellow core + translucent halo
+    // so it reads clearly against the coloured pore surface.
     const pos = cl[bestIdx]
-    const geo = new THREE.SphereGeometry(2.0, 16, 12)
-    const mat = new THREE.MeshBasicMaterial({
-      color: 0xffffff,
-      transparent: true,
-      opacity: 0.8,
+    const grp = new THREE.Group()
+    const coreGeo = new THREE.SphereGeometry(1.6, 20, 14)
+    const coreMat = new THREE.MeshBasicMaterial({
+      color: 0xfde047, transparent: true, opacity: 0.95,
     })
-    this.highlightMarker = new THREE.Mesh(geo, mat)
-    this.highlightMarker.position.set(pos[0], pos[1], pos[2])
-    this.scene.add(this.highlightMarker)
+    const core = new THREE.Mesh(coreGeo, coreMat)
+    core.position.set(pos[0], pos[1], pos[2])
+    grp.add(core)
+    const haloGeo = new THREE.SphereGeometry(3.2, 20, 14)
+    const haloMat = new THREE.MeshBasicMaterial({
+      color: 0xfde047, transparent: true, opacity: 0.22, depthWrite: false,
+    })
+    const halo = new THREE.Mesh(haloGeo, haloMat)
+    halo.position.set(pos[0], pos[1], pos[2])
+    grp.add(halo)
+    this.scene.add(grp)
+    this.highlightMarker = grp
   }
 
-  private highlightMarker: THREE.Mesh | null = null
+  private highlightMarker: THREE.Object3D | null = null
 
   /** Capture a PNG snapshot of the current canvas. */
   capturePNG(): string {
@@ -1139,7 +1187,9 @@ export class HoleViewer {
     if (this.rafId !== null) cancelAnimationFrame(this.rafId)
     this.resizeObserver?.disconnect()
     this.controls.dispose()
-    this.clearGroup(this.structureGroup)
+    this.clearGroup(this.cartoonGroup)
+    this.clearGroup(this.ballStickGroup)
+    this.clearGroup(this.poreSideChainsGroup)
     this.clearGroup(this.surfaceGroup)
     this.clearGroup(this.centreLineGroup)
     this.clearGroup(this.sphereGroup)

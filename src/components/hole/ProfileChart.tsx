@@ -36,14 +36,16 @@ export function ProfileChart({ profile, onHover }: ProfileChartProps) {
   const maxR = Math.max(profile.max_radius ?? Math.max(...data.map(d => d.r), 5), HOLE_MAX_GREEN + 1)
   const constrictionT = profile.min_t
 
-  const handleHover = useCallback((activePayload: any) => {
-    if (!activePayload || !activePayload.length || !onHover) {
+  const handleHover = useCallback((state: { activePayload?: any[]; isTooltipActive?: boolean }) => {
+    if (!onHover) return
+    const payload = state?.activePayload
+    if (!payload || !payload.length || !state?.isTooltipActive) {
       setHoverT(null)
-      onHover?.(null)
+      onHover(null)
       return
     }
-    const t = activePayload[0]?.payload?.t
-    if (t !== undefined) {
+    const t = payload[0]?.payload?.t
+    if (t !== undefined && t !== null) {
       setHoverT(t)
       onHover(t)
     }
@@ -78,7 +80,12 @@ export function ProfileChart({ profile, onHover }: ProfileChartProps) {
       onMouseLeave={handleLeave}
     >
       <ResponsiveContainer width="100%" height="100%">
-        <ComposedChart data={data} margin={{ top: 16, right: 24, bottom: 32, left: 12 }}>
+        <ComposedChart
+          data={data}
+          margin={{ top: 16, right: 24, bottom: 32, left: 12 }}
+          onMouseMove={handleHover}
+          onMouseLeave={handleLeave}
+        >
           <defs>
             <linearGradient id="profileFill" x1="0" y1="0" x2="0" y2="1">
               <stop offset="0%" stopColor="#3b82f6" stopOpacity={0.18} />
@@ -135,8 +142,6 @@ export function ProfileChart({ profile, onHover }: ProfileChartProps) {
             }}
             formatter={(value: number) => [`${value.toFixed(3)} Å`, 'Pore radius']}
             labelFormatter={(label: number) => `t = ${label.toFixed(2)} Å`}
-            // Recharts calls this with the active payload on hover
-            {...({ onHover: handleHover } as any)}
           />
           <ReferenceLine y={HOLE_NARROW} stroke={PORE_ZONE_COLORS.narrow} strokeDasharray="4 2"
             strokeOpacity={0.6}

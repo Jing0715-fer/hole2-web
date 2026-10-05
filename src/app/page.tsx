@@ -347,6 +347,7 @@ export default function Home() {
                   spheres={spheres}
                   surface={surface}
                   centreline={centreline}
+                  profile={profile}
                   options={viewerOpts}
                   bgColor="#0a0e1a"
                   onReady={(v) => { viewerRef.current = v }}

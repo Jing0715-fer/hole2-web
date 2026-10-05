@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react'
 import { HoleViewer, type HoleViewerOptions } from '@/lib/hole/viewer'
-import type { HoleSphere, HoleSurface } from '@/lib/hole/types'
+import type { HoleSphere, HoleSurface, PoreProfile } from '@/lib/hole/types'
 
 interface Viewer3DProps {
   pdbText: string | null
@@ -10,6 +10,9 @@ interface Viewer3DProps {
   spheres: HoleSphere[]
   surface: HoleSurface
   centreline: [number, number, number][]
+  /** Pore profile — provides cvec/cpoint so hover-on-chart can highlight the
+   *  corresponding 3D position on the centre line. */
+  profile?: PoreProfile
   options: HoleViewerOptions
   bgColor: string  // hex like '#0b1220'
   onReady?: (viewer: HoleViewer) => void
@@ -25,7 +28,7 @@ interface Viewer3DProps {
  * changes) are stored in refs and replayed right after initialisation so a
  * slow CDN never silently drops a structure load.
  */
-export function Viewer3D({ pdbText, pdbName, spheres, surface, centreline, options, bgColor, onReady }: Viewer3DProps) {
+export function Viewer3D({ pdbText, pdbName, spheres, surface, centreline, profile, options, bgColor, onReady }: Viewer3DProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const viewerRef = useRef<HoleViewer | null>(null)
   // Error state is stored together with the pdbText it belongs to, so a new
@@ -38,7 +41,7 @@ export function Viewer3D({ pdbText, pdbName, spheres, surface, centreline, optio
   // Latest inputs — read by the init effect to replay pending state.
   const pdbTextRef = useRef(pdbText)
   const pdbNameRef = useRef(pdbName)
-  const resultsRef = useRef({ spheres, surface, centreline })
+  const resultsRef = useRef({ spheres, surface, centreline, profile })
   const optionsRef = useRef(options)
   const onReadyRef = useRef(onReady)
 
@@ -47,10 +50,10 @@ export function Viewer3D({ pdbText, pdbName, spheres, surface, centreline, optio
   useEffect(() => {
     pdbTextRef.current = pdbText
     pdbNameRef.current = pdbName
-    resultsRef.current = { spheres, surface, centreline }
+    resultsRef.current = { spheres, surface, centreline, profile }
     optionsRef.current = options
     onReadyRef.current = onReady
-  }, [pdbText, pdbName, spheres, surface, centreline, options, onReady])
+  }, [pdbText, pdbName, spheres, surface, centreline, profile, options, onReady])
 
   // mount once
   useEffect(() => {
@@ -88,7 +91,7 @@ export function Viewer3D({ pdbText, pdbName, spheres, surface, centreline, optio
           }
           const r = resultsRef.current
           if (r.spheres.length || r.surface.triangles.length || r.centreline.length) {
-            v.loadHoleResults(r.spheres, r.surface, r.centreline)
+            v.loadHoleResults(r.spheres, r.surface, r.centreline, r.profile?.cvec ?? null, r.profile?.cpoint ?? null)
           }
           v.setOptions(optionsRef.current)
         } catch (e) {
@@ -140,11 +143,11 @@ export function Viewer3D({ pdbText, pdbName, spheres, surface, centreline, optio
     const v = viewerRef.current
     if (!v) return
     try {
-      v.loadHoleResults(spheres, surface, centreline)
+      v.loadHoleResults(spheres, surface, centreline, profile?.cvec ?? null, profile?.cpoint ?? null)
     } catch (e) {
       console.error('loadHoleResults error:', e)
     }
-  }, [spheres, surface, centreline, viewerReady])
+  }, [spheres, surface, centreline, profile, viewerReady])
 
   // option changes
   useEffect(() => {
