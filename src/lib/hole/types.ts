@@ -76,7 +76,7 @@ export interface HoleSurface {
 
 /** Summary card shown after a successful run. */
 export interface RunSummary {
-  status: 'ok' | 'error'
+  status: 'ok' | 'error' | 'no_pore'
   min_radius: number | null
   /** Channel coordinate of the constriction point. */
   min_t: number | null
@@ -87,6 +87,9 @@ export interface RunSummary {
   g_macro: number | null
   n_spheres: number
   n_triangles: number
+  /** The channel direction HOLE's auto-guess (cguess) picked (X/Y/Z).
+   *  Surfaced when the trace failed so the user can verify it. */
+  cguess_direction?: string | null
 }
 
 /** Raw output file produced by HOLE2 (for the downloads panel). */

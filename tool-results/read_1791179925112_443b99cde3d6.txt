@@ -1,0 +1,1184 @@
+     1→/**
+     2→ * HOLE2 pipeline runner — TypeScript port of the original Python
+     3→ * `mini-services/hole2-service/main.py`.
+     4→ *
+     5→ * Everything runs in-process inside a Next.js route handler — no separate
+     6→ * Python service.  The HOLE2 binaries (hole, sph_process, sos_triangle,
+     7→ * qpt_conv) live in `vendor/hole2/bin/` and are spawned with
+     8→ * `child_process.execFileSync`/`spawnSync`.
+     9→ *
+    10→ * Pipeline (per job, in `/tmp/hole2-jobs/{job_id}/`):
+    11→ *   1. Write the PDB file + .rad file + hole.inp
+    12→ *   2. Run `hole` — reads hole.inp on stdin, writes hole_out.txt + .sph
+    13→ *   3. Parse hole stdout → PoreProfile (samples, cvec/cpoint, Gmacro)
+    14→ *   4. Detect "no pore" (0 samples + 99999 sentinel) → return actionable hints
+    15→ *   5. Run `sph_process` twice (dot-surface .qpt + solid surface .sos)
+    16→ *   6. Run `sos_triangle` (.sos on stdin → VMD `draw trinorm` / `draw triangle`
+    17→ *      commands on stdout).  Auto-fallback: if "Maximum number of polygons
+    18→ *      exceeded", regenerate the .sos at dotden=5 in faceted mode and retry.
+    19→ *   7. Run `qpt_conv` (best-effort, 5 s timeout — the bundled build hangs on
+    20→ *      its interactive prompt feed; the conda-forge build does not).
+    21→ *   8. Parse the .sph + .vmd_plot files into structured data for the UI.
+    22→ *   9. Infer cvec/cpoint via PCA when HOLE masks them with `****************`.
+    23→ */
+    24→
+    25→import { spawnSync } from 'child_process'
+    26→import {
+    27→  existsSync, mkdirSync, readdirSync, statSync, copyFileSync,
+    28→  writeFileSync, readFileSync, unlinkSync, rmdirSync,
+    29→} from 'fs'
+    30→import path from 'path'
+    31→import os from 'os'
+    32→import { randomBytes } from 'crypto'
+    33→
+    34→// ---------------------------------------------------------------------------
+    35→// Configuration
+    36→// ---------------------------------------------------------------------------
+    37→
+    38→const PROJECT_ROOT = process.cwd()
+    39→const VENDOR_HOLE2 = path.join(PROJECT_ROOT, 'vendor', 'hole2')
+    40→const VENDOR_BIN = path.join(VENDOR_HOLE2, 'bin')
+    41→const VENDOR_RAD = path.join(VENDOR_HOLE2, 'rad')
+    42→const VENDOR_EXAMPLES = path.join(VENDOR_HOLE2, 'examples')
+    43→
+    44→// Repo-local examples (TRPM8 9PB6 demo with its recommended parameters).
+    45→const LOCAL_EXAMPLES = path.join(PROJECT_ROOT, 'mini-services', 'hole2-service', 'examples')
+    46→
+    47→// Persistent jobs directory — survives across requests so the download
+    48→// endpoints can stream files afterwards.
+    49→export const JOBS_DIR =
+    50→  process.env.HOLE2_JOBS_DIR || path.join(os.tmpdir(), 'hole2-jobs')
+    51→
+    52→// Hardening constants (match the original Python service).
+    53→export const MAX_UPLOAD_BYTES = 50 * 1024 * 1024 // 50 MB
+    54→export const MAX_RAD_BYTES = 1 * 1024 * 1024 // 1 MB
+    55→export const MAX_CONCURRENT_RUNS = 2
+    56→
+    57→const JOB_ID_RE = /^[0-9a-f]{12}$/
+    58→const SAFE_NAME_RE = /^[A-Za-z0-9_.-]+$/
+    59→const IGNORE_RE = /^[A-Za-z0-9 _-]+$/
+    60→
+    61→// HOLE's no-pore sentinel: "Minimum radius found:  99999.000 angstroms."
+    62→const NO_PORE_SENTINEL = 9999.0
+    63→
+    64→// ---------------------------------------------------------------------------
+    65→// Binary resolution
+    66→// ---------------------------------------------------------------------------
+    67→
+    68→/** Resolve a HOLE2 binary path (always bundled vendor/bin/). */
+    69→export function envBin(name: string): string {
+    70→  return path.join(VENDOR_BIN, name)
+    71→}
+    72→
+    73→/** Return true if the bundled `hole` binary is executable. */
+    74→export function envExists(): boolean {
+    75→  const p = envBin('hole')
+    76→  return existsSync(p)
+    77→}
+    78→
+    79→/**
+    80→ * Run a HOLE2 binary as a child process (synchronous — wrapped in
+    81→ * `runHolePipeline` which is itself awaited by the route handler).
+    82→ *
+    83→ * The binaries are pre-compiled ELF executables that only need the system
+    84→ * `libgfortran.so.5`.  We prepend the bin dir to PATH so the binaries can
+    85→ * find each other (and any system utilities they shell out to).
+    86→ */
+    87→export interface ProcResult {
+    88→  returncode: number
+    89→  stdout: string
+    90→  stderr: string
+    91→}
+    92→
+    93→export function runInEnv(
+    94→  args: string[],
+    95→  opts: { cwd: string; input?: Buffer | string | null; timeout?: number } = { cwd: process.cwd() },
+    96→): ProcResult {
+    97→  const env = { ...process.env }
+    98→  const binDir = VENDOR_BIN
+    99→  env.PATH = `${binDir}${path.delimiter}${env.PATH ?? ''}`
+   100→
+   101→  const input = opts.input ?? null
+   102→  try {
+   103→    const result = spawnSync(args[0], args.slice(1), {
+   104→      cwd: opts.cwd,
+   105→      input: input === null ? undefined : (typeof input === 'string' ? Buffer.from(input) : input),
+   106→      env,
+   107→      timeout: opts.timeout ?? 300_000,
+   108→      maxBuffer: 256 * 1024 * 1024, // 256 MB — large cryo-EM structures can print long logs
+   109→      encoding: 'utf-8' as const,
+   110→    })
+   111→    return {
+   112→      returncode: result.status ?? -1,
+   113→      stdout: result.stdout ?? '',
+   114→      stderr: result.stderr ?? '',
+   115→    }
+   116→  } catch (e) {
+   117→    return {
+   118→      returncode: -1,
+   119→      stdout: '',
+   120→      stderr: (e as Error).message,
+   121→    }
+   122→  }
+   123→}
+   124→
+   125→// ---------------------------------------------------------------------------
+   126→// Parsed-output types
+   127→// ---------------------------------------------------------------------------
+   128→
+   129→export interface ProfileSample {
+   130→  /** Channel coordinate = cenxyz.cvec (dot product of sphere centre with CVECT). */
+   131→  t: number
+   132→  /** Pore radius at this sample (Å). */
+   133→  r: number
+   134→  /** Distance along the centre line (cen_line_D column). */
+   135→  cen_line_d: number
+   136→  /** Cumulative conductance integral sum{s/(area)}. */
+   137→  cond_integral: number
+   138→  /** "mid" or "sampled" — HOLE alternates the two. */
+   139→  kind: 'mid' | 'sampled'
+   140→}
+   141→
+   142→export interface PoreProfile {
+   143→  cvec: [number, number, number] | null
+   144→  cpoint: [number, number, number] | null
+   145→  samples: ProfileSample[]
+   146→  min_radius: number | null
+   147→  min_t: number | null
+   148→  max_radius: number | null
+   149→  n_samples: number
+   150→  g_factor: number | null
+   151→  g_macro: number | null
+   152→  pore_length: number | null
+   153→}
+   154→
+   155→export interface HoleSphere {
+   156→  x: number
+   157→  y: number
+   158→  z: number
+   159→  r: number
+   160→  /** resSeq number — HOLE uses sentinels: -888 (end), -999 (Connolly cloud). */
+   161→  idx: number
+   162→}
+   163→
+   164→export interface HoleTriangle {
+   165→  /** v0, v1, v2 — each [x,y,z]. */
+   166→  vertices: [number, number, number][]
+   167→  /** n0, n1, n2 — each [x,y,z]. */
+   168→  normals: [number, number, number][]
+   169→  /** HOLE colour name (red / green / blue / yellow / ...). */
+   170→  color: string
+   171→}
+   172→
+   173→export interface HoleSurface {
+   174→  triangles: HoleTriangle[]
+   175→  colors: string[]
+   176→}
+   177→
+   178→// ---------------------------------------------------------------------------
+   179→// Parsers — extract structured data from the raw hole stdout + .sph file
+   180→// ---------------------------------------------------------------------------
+   181→
+   182→// Matches a HOLE profile-table line.  The 4 numeric columns are:
+   183→//   col 1 = cenxyz.cvec (channel coordinate t)
+   184→//   col 2 = radius (pore radius in Å)
+   185→//   col 3 = cen_line_D (distance along centre line)
+   186→//   col 4 = sum{s/(area)} (conductance integral)
+   187→// Connolly mode appends extra columns before the (mid-point|sampled) tag:
+   188→//   31.56571   4.21656  12.36435   0.35151 1000000.000   6.506   0.149  (sampled)
+   189→const PROFILE_LINE =
+   190→  /^\s*(-?\d+\.\d+)\s+(-?\d+\.\d+)\s+(-?\d+\.\d+)\s+(-?\d+\.\d+).{0,80}\((mid-point|sampled)\)\s*$/
+   191→
+   192→const MIN_RADIUS = /Minimum radius found:\s+(-?\d+\.\d+)/i
+   193→const CVECT = /channel vector:\s+(-?\d+\.\d+)\s+(-?\d+\.\d+)\s+(-?\d+\.\d+)/i
+   194→const CPOINT = /point in channel:\s+(-?\d+\.\d+)\s+(-?\d+\.\d+)\s+(-?\d+\.\d+)/i
+   195→const CGUESS_CVECT = /^CVECT\s+(-?\d+\.\d+)\s+(-?\d+\.\d+)\s+(-?\d+\.\d+)/im
+   196→const CGUESS_CPOINT = /^CPOINT\s+(-?\d+\.\d+)\s+(-?\d+\.\d+)\s+(-?\d+\.\d+)/im
+   197→const G_FACTOR = /F=\s*sum\(ds\/area\).*?is\s+(-?\d+\.\d+)/i
+   198→const GMACRO = /Gmacro=\s*([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)/i
+   199→const GMACRO_TAG =
+   200→  /TAG\s+\d+\s+Rmin=\s*([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)\s+Gmacro=\s*(Infinity|[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)/i
+   201→const BEST_DIRECTION = /Best direction is found to be\s+(\d)/
+   202→const ERROR_LINES = /^.*\bERROR\b.*$/gim
+   203→
+   204→/** Parse the human-readable hole stdout into a structured PoreProfile. */
+   205→export function parseHoleStdout(text: string): PoreProfile {
+   206→  const prof: PoreProfile = {
+   207→    cvec: null,
+   208→    cpoint: null,
+   209→    samples: [],
+   210→    min_radius: null,
+   211→    min_t: null,
+   212→    max_radius: null,
+   213→    n_samples: 0,
+   214→    g_factor: null,
+   215→    g_macro: null,
+   216→    pore_length: null,
+   217→  }
+   218→
+   219→  // cvec / cpoint — HOLE masks these with "************************" when it
+   220→  // auto-guesses via cguess.  cguess also prints the actual values on separate
+   221→  // CVECT/CPOINT lines right after the masking — we try the explicit line first,
+   222→  // then fall back to the cguess-printed line.
+   223→  const cv = text.match(CVECT)
+   224→  if (cv) {
+   225→    prof.cvec = [parseFloat(cv[1]), parseFloat(cv[2]), parseFloat(cv[3])]
+   226→  } else {
+   227→    const cvg = text.match(CGUESS_CVECT)
+   228→    if (cvg) prof.cvec = [parseFloat(cvg[1]), parseFloat(cvg[2]), parseFloat(cvg[3])]
+   229→  }
+   230→  const cp = text.match(CPOINT)
+   231→  if (cp) {
+   232→    prof.cpoint = [parseFloat(cp[1]), parseFloat(cp[2]), parseFloat(cp[3])]
+   233→  } else {
+   234→    const cpg = text.match(CGUESS_CPOINT)
+   235→    if (cpg) prof.cpoint = [parseFloat(cpg[1]), parseFloat(cpg[2]), parseFloat(cpg[3])]
+   236→  }
+   237→
+   238→  // Profile samples — capture the 4 columns from each (sampled/mid-point) line
+   239→  for (const line of text.split(/\r?\n/)) {
+   240→    const m = line.match(PROFILE_LINE)
+   241→    if (!m) continue
+   242→    const t = parseFloat(m[1]) // cenxyz.cvec — channel coordinate
+   243→    const r = parseFloat(m[2]) // radius — pore radius (Å)
+   244→    const cenLineD = parseFloat(m[3])
+   245→    const condInt = parseFloat(m[4])
+   246→    const kind: 'mid' | 'sampled' = m[5] === 'mid-point' ? 'mid' : 'sampled'
+   247→    prof.samples.push({
+   248→      t, r, cen_line_d: cenLineD, cond_integral: condInt, kind,
+   249→    })
+   250→  }
+   251→
+   252→  const mn = text.match(MIN_RADIUS)
+   253→  if (mn) prof.min_radius = parseFloat(mn[1])
+   254→
+   255→  const gf = text.match(G_FACTOR)
+   256→  if (gf) prof.g_factor = parseFloat(gf[1])
+   257→
+   258→  // Gmacro: prefer the TAG summary line (also carries Rmin); fall back to the
+   259→  // plain "Gmacro=" line. Both regexes accept exponent notation.
+   260→  const gm = text.match(GMACRO_TAG)
+   261→  if (gm && gm[2].toLowerCase() !== 'infinity') {
+   262→    prof.g_macro = parseFloat(gm[2])
+   263→  } else {
+   264→    const gm2 = text.match(GMACRO)
+   265→    if (gm2) {
+   266→      const v = parseFloat(gm2[1])
+   267→      if (!Number.isNaN(v)) prof.g_macro = v
+   268→    }
+   269→  }
+   270→
+   271→  if (prof.samples.length > 0) {
+   272→    prof.n_samples = prof.samples.length
+   273→    const rs = prof.samples.map((s) => s.r)
+   274→    prof.max_radius = Math.max(...rs)
+   275→    const ts = prof.samples.map((s) => s.t)
+   276→    prof.pore_length = Math.max(...ts) - Math.min(...ts)
+   277→    // Constriction point — the sample with the smallest radius.
+   278→    let minIdx = 0
+   279→    for (let i = 1; i < prof.samples.length; i++) {
+   280→      if (prof.samples[i].r < prof.samples[minIdx].r) minIdx = i
+   281→    }
+   282→    prof.min_radius = prof.samples[minIdx].r
+   283→    prof.min_t = prof.samples[minIdx].t
+   284→  } else if (prof.min_radius !== null && prof.min_radius >= NO_PORE_SENTINEL) {
+   285→    // HOLE traced nothing (e.g. it could not find a path from cpoint to solvent
+   286→    // below endrad) and printed its 99999 "no pore" sentinel.
+   287→    prof.min_radius = null
+   288→  }
+   289→  return prof
+   290→}
+   291→
+   292→/** Infer the pore channel axis + centre via PCA on the .sph sphere centres.
+   293→ *
+   294→ *  HOLE masks cvec/cpoint with "************************" in the log when it
+   295→ *  auto-guesses them.  We recover the channel direction by Jacobi
+   296→ *  eigen-decomposition of the 3×3 covariance matrix of the sphere centres —
+   297→ *  the dominant eigenvector IS the channel direction.  The centroid is a
+   298→ *  good approximation of cpoint.
+   299→ *
+   300→ *  Returns [cvecUnit, cpoint] or [[0,0,1], [0,0,0]] if too few spheres.
+   301→ */
+   302→export function inferChannelAxis(
+   303→  spheres: HoleSphere[],
+   304→): [[number, number, number], [number, number, number]] {
+   305→  if (spheres.length < 4) {
+   306→    return [[0, 0, 1], [0, 0, 0]]
+   307→  }
+   308→  const n = spheres.length
+   309→  let cx = 0, cy = 0, cz = 0
+   310→  for (const s of spheres) { cx += s.x; cy += s.y; cz += s.z }
+   311→  cx /= n; cy /= n; cz /= n
+   312→
+   313→  let sxx = 0, syy = 0, szz = 0, sxy = 0, sxz = 0, syz = 0
+   314→  for (const s of spheres) {
+   315→    const dx = s.x - cx, dy = s.y - cy, dz = s.z - cz
+   316→    sxx += dx * dx; syy += dy * dy; szz += dz * dz
+   317→    sxy += dx * dy; sxz += dx * dz; syz += dy * dz
+   318→  }
+   319→  // Symmetric 3×3 covariance matrix (row-major).
+   320→  const m = [
+   321→    sxx / n, sxy / n, sxz / n,
+   322→    sxy / n, syy / n, syz / n,
+   323→    sxz / n, syz / n, szz / n,
+   324→  ]
+   325→  // Eigenvectors — start with the identity.
+   326→  const v = [1, 0, 0, 0, 1, 0, 0, 0, 1]
+   327→
+   328→  for (let iter = 0; iter < 50; iter++) {
+   329→    let off = 0
+   330→    for (let i = 0; i < 3; i++) {
+   331→      for (let j = i + 1; j < 3; j++) {
+   332→        off += m[i * 3 + j] * m[i * 3 + j]
+   333→      }
+   334→    }
+   335→    if (off < 1e-18) break
+   336→
+   337→    for (let p = 0; p < 2; p++) {
+   338→      for (let q = p + 1; q < 3; q++) {
+   339→        const mpq = m[p * 3 + q]
+   340→        if (Math.abs(mpq) < 1e-16) continue
+   341→        const theta = (m[q * 3 + q] - m[p * 3 + p]) / (2 * mpq)
+   342→        const t = Math.sign(theta) / (Math.abs(theta) + Math.sqrt(theta * theta + 1))
+   343→        const c = 1 / Math.sqrt(t * t + 1)
+   344→        const s = t * c
+   345→        // Zero out m[p,q] via Givens rotation
+   346→        for (let k = 0; k < 3; k++) {
+   347→          const mkp = m[k * 3 + p]
+   348→          const mkq = m[k * 3 + q]
+   349→          m[k * 3 + p] = c * mkp - s * mkq
+   350→          m[k * 3 + q] = s * mkp + c * mkq
+   351→        }
+   352→        for (let k = 0; k < 3; k++) {
+   353→          const mpk = m[p * 3 + k]
+   354→          const mqk = m[q * 3 + k]
+   355→          m[p * 3 + k] = c * mpk - s * mqk
+   356→          m[q * 3 + k] = s * mpk + c * mqk
+   357→        }
+   358→        for (let k = 0; k < 3; k++) {
+   359→          const vkp = v[k * 3 + p]
+   360→          const vkq = v[k * 3 + q]
+   361→          v[k * 3 + p] = c * vkp - s * vkq
+   362→          v[k * 3 + q] = s * vkp + c * vkq
+   363→        }
+   364→      }
+   365→    }
+   366→  }
+   367→
+   368→  // Eigenvalues = m[0], m[4], m[8]; eigenvectors = columns of v.
+   369→  const vals = [m[0], m[4], m[8]]
+   370→  const vecs: [number, number, number][] = [
+   371→    [v[0], v[3], v[6]],
+   372→    [v[1], v[4], v[7]],
+   373→    [v[2], v[5], v[8]],
+   374→  ]
+   375→  // Pick the eigenvector with the largest eigenvalue = channel direction.
+   376→  let best = 0
+   377→  for (let i = 1; i < 3; i++) if (vals[i] > vals[best]) best = i
+   378→  const axis = vecs[best]
+   379→  const norm = Math.sqrt(axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2])
+   380→  if (norm < 1e-12) {
+   381→    return [[0, 0, 1], [cx, cy, cz]]
+   382→  }
+   383→  const cvec: [number, number, number] = [axis[0] / norm, axis[1] / norm, axis[2] / norm]
+   384→  return [cvec, [cx, cy, cz]]
+   385→}
+   386→
+   387→/** Parse a HOLE .sph file (pseudo-PDB) into a compact list of sphere dicts.
+   388→ *
+   389→ *  Each ATOM record represents one pore-sphere centre.  resSeq sentinels:
+   390→ *    -888 = end marker spheres at the pore exits (skipped)
+   391→ *    -999 = Connolly-probe sampling cloud (kept, but excluded from the
+   392→ *           centre line by `centreLineSpheres`)
+   393→ *    0, 1, 2, ... / -1, -2, ... = the actual pore centre-line spheres.
+   394→ */
+   395→export function parseSphFile(filePath: string): HoleSphere[] {
+   396→  const out: HoleSphere[] = []
+   397→  if (!existsSync(filePath)) return out
+   398→  const text = readFileSync(filePath, 'utf-8')
+   399→  for (const line of text.split(/\r?\n/)) {
+   400→    if (!line.startsWith('ATOM')) continue
+   401→    let resSeq = 0
+   402→    try {
+   403→      resSeq = parseInt(line.slice(22, 26).trim(), 10) || 0
+   404→    } catch { /* keep 0 */ }
+   405→    if (resSeq === -888) continue // skip end markers
+   406→    try {
+   407→      const x = parseFloat(line.slice(30, 38).trim())
+   408→      const y = parseFloat(line.slice(38, 46).trim())
+   409→      const z = parseFloat(line.slice(46, 54).trim())
+   410→      const bfac = parseFloat(line.slice(60, 66).trim()) // B-factor = pore radius
+   411→      if ([x, y, z, bfac].some((v) => Number.isNaN(v))) continue
+   412→      out.push({ x, y, z, r: bfac, idx: resSeq })
+   413→    } catch { /* skip bad line */ }
+   414→  }
+   415→  return out
+   416→}
+   417→
+   418→/** Return only the real pore centre-line spheres (exclude the -999 Connolly cloud). */
+   419→export function centreLineSpheres(spheres: HoleSphere[]): HoleSphere[] {
+   420→  return spheres.filter((s) => s.idx !== -999)
+   421→}
+   422→
+   423→/** Parse a sos_triangle-generated .vmd_plot file.
+   424→ *
+   425→ *  Returns `{ triangles, colors }`.
+   426→ *
+   427→ *  sos_triangle has two output modes:
+   428→ *    - Smooth (-s):  `draw trinorm  {v0} {v1} {v2} {n0} {n1} {n2}`
+   429→ *      (6 triples — 3 vertices + 3 normals)
+   430→ *    - Faceted (default):  `draw triangle  {v0} {v1} {v2}`
+   431→ *      (3 triples — vertices only, no normals; we compute the face normal
+   432→ *      via the cross product of two edges)
+   433→ */
+   434→export function parseSosVmd(filePath: string): HoleSurface {
+   435→  const tris: HoleTriangle[] = []
+   436→  const colors: string[] = []
+   437→  let curColor = ''
+   438→  if (!existsSync(filePath)) return { triangles: tris, colors }
+   439→
+   440→  const text = readFileSync(filePath, 'utf-8')
+   441→  const tripleRe = /\{\s*(-?\d+\.\d+)\s+(-?\d+\.\d+)\s+(-?\d+\.\d+)\s*\}/g
+   442→
+   443→  for (const rawLine of text.split(/\r?\n/)) {
+   444→    const line = rawLine.replace(/\s+$/, '')
+   445→    if (!line) continue
+   446→    if (line.startsWith('draw color')) {
+   447→      curColor = line.slice('draw color'.length).trim()
+   448→      continue
+   449→    }
+   450→    if (line.startsWith('draw trinorm')) {
+   451→      // Smooth mode: 6 triples = 3 vertices + 3 normals
+   452→      const matches = [...line.matchAll(tripleRe)]
+   453→      if (matches.length === 6) {
+   454→        const v = matches.map((m) => [
+   455→          parseFloat(m[1]), parseFloat(m[2]), parseFloat(m[3]),
+   456→        ] as [number, number, number])
+   457→        tris.push({ vertices: v.slice(0, 3), normals: v.slice(3), color: curColor })
+   458→        colors.push(curColor)
+   459→      }
+   460→    } else if (line.startsWith('draw triangle')) {
+   461→      // Faceted mode: 3 triples = vertices only, no normals.
+   462→      const matches = [...line.matchAll(tripleRe)]
+   463→      if (matches.length === 3) {
+   464→        const v = matches.map((m) => [
+   465→          parseFloat(m[1]), parseFloat(m[2]), parseFloat(m[3]),
+   466→        ] as [number, number, number])
+   467→        const e1: [number, number, number] = [
+   468→          v[1][0] - v[0][0], v[1][1] - v[0][1], v[1][2] - v[0][2],
+   469→        ]
+   470→        const e2: [number, number, number] = [
+   471→          v[2][0] - v[0][0], v[2][1] - v[0][1], v[2][2] - v[0][2],
+   472→        ]
+   473→        let nx = e1[1] * e2[2] - e1[2] * e2[1]
+   474→        let ny = e1[2] * e2[0] - e1[0] * e2[2]
+   475→        let nz = e1[0] * e2[1] - e1[1] * e2[0]
+   476→        const norm = Math.sqrt(nx * nx + ny * ny + nz * nz)
+   477→        if (norm > 1e-12) { nx /= norm; ny /= norm; nz /= norm }
+   478→        const n: [number, number, number] = [nx, ny, nz]
+   479→        tris.push({ vertices: v, normals: [n, n, n], color: curColor })
+   480→        colors.push(curColor)
+   481→      }
+   482→    }
+   483→    // "draw line" / "draw point" — centre-line dots; ignored.
+   484→  }
+   485→  return { triangles: tris, colors }
+   486→}
+   487→
+   488→// ---------------------------------------------------------------------------
+   489→// HOLE2 run pipeline
+   490→// ---------------------------------------------------------------------------
+   491→
+   492→/** Parameters accepted by runHolePipeline (matches the Python service's schema). */
+   493→export interface RunParamsInternal {
+   494→  radius_set: string
+   495→  cpoint_x: number | null
+   496→  cpoint_y: number | null
+   497→  cpoint_z: number | null
+   498→  cvect_x: number | null
+   499→  cvect_y: number | null
+   500→  cvect_z: number | null
+   501→  endrad: number
+   502→  shorto: number
+   503→  connolly: boolean
+   504→  ignore_residues: string
+   505→  sphpdb_name: string
+   506→  dotden: number
+   507→  smooth_surface: boolean
+   508→}
+   509→
+   510→export interface RunResult {
+   511→  job_id: string
+   512→  work_dir: string
+   513→  profile: PoreProfile
+   514→  spheres: HoleSphere[]
+   515→  surface: HoleSurface
+   516→  summary: Record<string, unknown>
+   517→  files: string[]
+   518→  log_tail: string
+   519→  returncode: number
+   520→  error: string | null
+   521→  warnings: string[]
+   522→  centreline: [number, number, number][]
+   523→}
+   524→
+   525→/** Construct a HOLE input file (.inp) from the web-form parameters. */
+   526→export function buildHoleInput(
+   527→  params: RunParamsInternal,
+   528→  pdbName: string,
+   529→  radPath: string,
+   530→  sphpdbName: string,
+   531→): string {
+   532→  const lines: string[] = []
+   533→  lines.push(`coord ${pdbName}`)
+   534→  lines.push(`radius ${radPath}`)
+   535→  if (params.ignore_residues) lines.push(`ignore ${params.ignore_residues}`)
+   536→  if (params.connolly) lines.push('CONNOLLY')
+   537→  if (
+   538→    params.cvect_x !== null && params.cvect_y !== null && params.cvect_z !== null
+   539→  ) {
+   540→    lines.push(
+   541→      `cvect ${params.cvect_x.toFixed(4)} ${params.cvect_y.toFixed(4)} ${params.cvect_z.toFixed(4)}`,
+   542→    )
+   543→  }
+   544→  if (
+   545→    params.cpoint_x !== null && params.cpoint_y !== null && params.cpoint_z !== null
+   546→  ) {
+   547→    lines.push(
+   548→      `cpoint ${params.cpoint_x.toFixed(4)} ${params.cpoint_y.toFixed(4)} ${params.cpoint_z.toFixed(4)}`,
+   549→    )
+   550→  }
+   551→  if (params.shorto !== null) lines.push(`shorto ${Math.trunc(params.shorto)}`)
+   552→  lines.push(`sphpdb ${sphpdbName}.sph`)
+   553→  lines.push(`endrad ${params.endrad.toFixed(2)}`)
+   554→  return lines.join('\n') + '\n'
+   555→}
+   556→
+   557→/** Run the full HOLE2 pipeline on the given PDB and return parsed results. */
+   558→export function runHolePipeline(
+   559→  pdbBytes: Buffer,
+   560→  pdbName: string,
+   561→  params: RunParamsInternal,
+   562→  customRad: Buffer | null,
+   563→): RunResult {
+   564→  if (!envExists()) {
+   565→    throw new Error(
+   566→      'HOLE2 binaries are not available at vendor/hole2/bin/. ' +
+   567→      'Clone the repo recursively or download the HOLE2 binaries.',
+   568→    )
+   569→  }
+   570→
+   571→  // Make sure the jobs directory exists.
+   572→  if (!existsSync(JOBS_DIR)) mkdirSync(JOBS_DIR, { recursive: true })
+   573→
+   574→  const jobId = randomBytes(6).toString('hex')
+   575→  const workDir = path.join(JOBS_DIR, jobId)
+   576→  mkdirSync(workDir, { recursive: true })
+   577→
+   578→  // 1. Write the PDB file (basename-only, force .pdb extension).
+   579→  let safePdb = pdbName ? path.basename(pdbName) : 'input.pdb'
+   580→  if (!safePdb.endsWith('.pdb')) safePdb += '.pdb'
+   581→  const pdbPath = path.join(workDir, safePdb)
+   582→  writeFileSync(pdbPath, pdbBytes)
+   583→
+   584→  // 2. Pick / write the radius file.
+   585→  let radPath: string
+   586→  if (customRad && customRad.length > 0) {
+   587→    radPath = path.join(workDir, 'custom.rad')
+   588→    writeFileSync(radPath, customRad)
+   589→  } else {
+   590→    const radSet = params.radius_set || 'simple'
+   591→    const bundled = path.join(VENDOR_RAD, `${radSet}.rad`)
+   592→    if (!existsSync(bundled)) {
+   593→      throw new Error(`Unknown radius set: ${radSet}`)
+   594→    }
+   595→    radPath = path.join(workDir, `${radSet}.rad`)
+   596→    copyFileSync(bundled, radPath)
+   597→  }
+   598→
+   599→  // 3. Write the hole.inp file (also fed to hole via stdin).
+   600→  const sphpdbName = params.sphpdb_name || 'hole_out'
+   601→  const inpText = buildHoleInput(params, safePdb, radPath, sphpdbName)
+   602→  writeFileSync(path.join(workDir, 'hole.inp'), inpText)
+   603→
+   604→  // 4. Run `hole` — reads hole.inp on stdin, writes hole_out.txt + .sph.
+   605→  let out = '', err = '', rc = 0
+   606→  try {
+   607→    const r = runInEnv([envBin('hole')], { cwd: workDir, input: inpText, timeout: 300_000 })
+   608→    out = r.stdout; err = r.stderr; rc = r.returncode
+   609→  } catch (e) {
+   610→    const msg = (e as Error).message
+   611→    if (msg.includes('TIMED OUT') || msg.includes('timeout')) {
+   612→      throw new Error(
+   613→        'The HOLE binary timed out (>300 s) on this structure — it may be too large, ' +
+   614→        'or the parameters may send the Monte-Carlo search into open space. ' +
+   615→        'Try ignoring hydrogens/solvent residues or providing an explicit CPOINT.',
+   616→      )
+   617→    }
+   618→    throw e
+   619→  }
+   620→
+   621→  // hole.f prints " HOLE: normal completion" on EVERY exit path (including
+   622→  // fatal errors), so a zero return code does NOT imply a pore was found.
+   623→  // parseHoleStdout + the checks below look at the actual content.
+   624→  const combinedLog = out + (err ? '\n' + err : '')
+   625→  writeFileSync(path.join(workDir, 'hole_out.txt'), combinedLog)
+   626→  if (rc !== 0 && !out.includes('normal completion')) {
+   627→    return {
+   628→      job_id: jobId,
+   629→      work_dir: workDir,
+   630→      profile: emptyProfile(),
+   631→      spheres: [],
+   632→      surface: { triangles: [], colors: [] },
+   633→      summary: { status: 'error', returncode: rc, stderr: err.slice(-2000) },
+   634→      files: listFiles(workDir),
+   635→      log_tail: out.slice(-3000),
+   636→      returncode: rc,
+   637→      error: err.slice(-1500) || 'HOLE failed',
+   638→      warnings: [],
+   639→      centreline: [],
+   640→    }
+   641→  }
+   642→
+   643→  const profile = parseHoleStdout(out)
+   644→  const errorLines = (out.match(ERROR_LINES) || []).map((l) => l.trim()).slice(0, 10)
+   645→  const mDir = out.match(BEST_DIRECTION)
+   646→  const cguessDirection = mDir
+   647→    ? ({ '1': 'X', '2': 'Y', '3': 'Z' } as Record<string, string>)[mDir[1]] ?? null
+   648→    : null
+   649→
+   650→  // -- "no pore traced" failure mode ---------------------------------------
+   651→  // HOLE can exit cleanly (rc=0, "normal completion") yet fail to trace any
+   652→  // pore: 0 profile samples + the 99999 sentinel minimum radius.  Surface an
+   653→  // actionable error instead of silently returning an empty profile.
+   654→  if (profile.n_samples === 0) {
+   655→    const hints: string[] = [
+   656→      'HOLE completed but could not trace a pore with the current parameters.',
+   657→    ]
+   658→    if (errorLines.length > 0) {
+   659→      hints.splice(1, 0, 'HOLE reported: ' + errorLines.slice(0, 3).join('; '))
+   660→    } else if (cguessDirection) {
+   661→      hints.push(
+   662→        `The automatic guess (cguess) chose the channel direction ${cguessDirection} — ` +
+   663→        'verify this matches the real pore axis; for large multi-domain channels ' +
+   664→        'the guess is often wrong.',
+   665→      )
+   666→    }
+   667→    if (params.cpoint_x === null && params.cvect_x === null) {
+   668→      hints.push(
+   669→        'Try providing an explicit Channel vector (CVECT) and Channel centre point (CPOINT) — ' +
+   670→        "e.g. for a C4-symmetric tetramer the pore runs through the symmetry axis.",
+   671→      )
+   672→    }
+   673→    hints.push(
+   674→      `If the pore has a wide vestibule or central cavity, raise the end radius ` +
+   675→      `(currently ${params.endrad.toFixed(1)} Å) above the cavity radius (e.g. 20–25 Å) ` +
+   676→      `so the trace continues through it instead of stopping at the first wide point.`,
+   677→    )
+   678→    hints.push(
+   679→      'Also consider ignoring solvent/ligand residues (HOH TIP WAT ...) that may block the pore.',
+   680→    )
+   681→    const warnings =
+   682→      hints.length > 2 ? [hints.slice(0, 2).join(' '), ...hints.slice(2)] : hints
+   683→    return {
+   684→      job_id: jobId,
+   685→      work_dir: workDir,
+   686→      profile,
+   687→      spheres: [],
+   688→      surface: { triangles: [], colors: [] },
+   689→      summary: {
+   690→        status: 'no_pore',
+   691→        returncode: rc,
+   692→        cguess_direction: cguessDirection,
+   693→        min_radius: null,
+   694→        n_samples: 0,
+   695→      },
+   696→      files: listFiles(workDir),
+   697→      log_tail: out.slice(-3000),
+   698→      returncode: rc,
+   699→      error: 'HOLE could not trace a pore — see warnings for suggested fixes.',
+   700→      warnings,
+   701→      centreline: [],
+   702→    }
+   703→  }
+   704→
+   705→  // 5. Run `sph_process` twice — once for the dot surface (.qpt) and once
+   706→  //    for the solid surface (.sos).
+   707→  const sphPath = path.join(workDir, `${sphpdbName}.sph`)
+   708→  const dotden = Math.max(5, Math.min(30, Math.trunc(params.dotden) || 15))
+   709→  const dotQpt = path.join(workDir, 'dotsurface.qpt')
+   710→  const solidSos = path.join(workDir, 'solid_surface.sos')
+   711→
+   712→  // Dot surface (.qpt) — best-effort, ignore failures.
+   713→  try {
+   714→    runInEnv(
+   715→      [envBin('sph_process'), '-dotden', String(dotden), '-color', sphPath, dotQpt],
+   716→      { cwd: workDir, input: null, timeout: 120_000 },
+   717→    )
+   718→  } catch { /* ignore — dot surface is best-effort */ }
+   719→
+   720→  // Solid surface (.sos).
+   721→  try {
+   722→    runInEnv(
+   723→      [envBin('sph_process'), '-sos', '-dotden', String(dotden), '-color', sphPath, solidSos],
+   724→      { cwd: workDir, input: null, timeout: 120_000 },
+   725→    )
+   726→  } catch { /* ignore — sos_triangle will fail later */ }
+   727→
+   728→  // 6. sos_triangle → .vmd_plot.  sos_triangle reads the .sos file from
+   729→  //    STDIN and writes VMD `draw trinorm`/`draw triangle` commands to STDOUT.
+   730→  //    It can fail on large pores with "Maximum number of polygons exceeded" —
+   731→  //    in that case we automatically retry with dotden=5 and faceted mode.
+   732→  const vmdPath = path.join(workDir, 'solid_surface.vmd_plot')
+   733→  const smooth = params.smooth_surface !== false
+   734→  let sosWarning: string | null = null
+   735→
+   736→  const trySosTriangle = (
+   737→    sosContent: Buffer,
+   738→    useSmooth: boolean,
+   739→  ): { drawLines: string[]; stderr: string; returncode: number } => {
+   740→    const cmd = [envBin('sos_triangle')]
+   741→    if (useSmooth) cmd.push('-s')
+   742→    const env = { ...process.env }
+   743→    env.PATH = `${VENDOR_BIN}${path.delimiter}${env.PATH ?? ''}`
+   744→    try {
+   745→      const result = spawnSync(cmd[0], cmd.slice(1), {
+   746→        cwd: workDir,
+   747→        input: sosContent,
+   748→        env,
+   749→        timeout: 180_000,
+   750→        maxBuffer: 256 * 1024 * 1024,
+   751→        encoding: 'utf-8' as const,
+   752→      })
+   753→      const stdout = result.stdout ?? ''
+   754→      const stderr = result.stderr ?? ''
+   755→      const drawLines = stdout
+   756→        .split(/\r?\n/)
+   757→        .filter((l) => l.startsWith('draw '))
+   758→      return { drawLines, stderr, returncode: result.status ?? -1 }
+   759→    } catch (e) {
+   760→      return { drawLines: [], stderr: (e as Error).message, returncode: -1 }
+   761→    }
+   762→  }
+   763→
+   764→  try {
+   765→    if (existsSync(solidSos) && statSync(solidSos).size > 0) {
+   766→      const sosContent = readFileSync(solidSos)
+   767→      // First attempt with the user-requested settings.
+   768→      const first = trySosTriangle(sosContent, smooth)
+   769→      let drawLines = first.drawLines
+   770→      let stderr = first.stderr
+   771→      if (drawLines.length === 0 && stderr.includes('Maximum number of polygons exceeded')) {
+   772→        // Auto-fallback: regenerate .sos with dotden=5 (minimum density) and
+   773→        // try again with faceted (non-smooth) mode.  This handles large pores
+   774→        // like the cholera-toxin pentamer.  Keep the original .sos as
+   775→        // .sos.full for download.
+   776→        try {
+   777→          if (existsSync(solidSos)) copyFileSync(solidSos, path.join(workDir, 'solid_surface.sos.full'))
+   778→          runInEnv(
+   779→            [envBin('sph_process'), '-sos', '-dotden', '5', '-color', sphPath, solidSos],
+   780→            { cwd: workDir, input: null, timeout: 120_000 },
+   781→          )
+   782→          if (existsSync(solidSos) && statSync(solidSos).size > 0) {
+   783→            const sos2 = readFileSync(solidSos)
+   784→            const retry = trySosTriangle(sos2, false)
+   785→            drawLines = retry.drawLines
+   786→            stderr = retry.stderr
+   787→            if (drawLines.length > 0) {
+   788→              sosWarning =
+   789→                'sos_triangle exceeded its polygon limit with the requested settings — ' +
+   790→                'used auto-fallback (dotden=5, faceted surface) to generate the 3D mesh. ' +
+   791→                'The full-density .sos is also available as solid_surface.sos.full.'
+   792→            }
+   793→          }
+   794→        } catch { /* ignore — fall through to the empty-output branch */ }
+   795→      }
+   796→
+   797→      if (drawLines.length > 0) {
+   798→        writeFileSync(vmdPath, drawLines.join('\n') + '\n')
+   799→      } else if (stderr.includes('Maximum number of polygons exceeded')) {
+   800→        sosWarning =
+   801→          'sos_triangle exceeded its polygon limit on this large pore, even with the ' +
+   802→          'auto-fallback (dotden=5, faceted). The .sos intermediate file is still available ' +
+   803→          'for download — try a smaller endrad locally. The 3D surface will not be shown.'
+   804→      } else {
+   805→        sosWarning = `sos_triangle produced no output. stderr: ${stderr.slice(-300)}`
+   806→      }
+   807→    }
+   808→  } catch (e) {
+   809→    sosWarning = `sos_triangle failed: ${(e as Error).message}`
+   810→  }
+   811→
+   812→  // 7. qpt_conv → dotsurface.vmd_plot.  Best-effort — the bundled vendor
+   813→  //    build hangs on the prompt feed (conda-forge exits cleanly), so the
+   814→  //    timeout is kept SHORT (5 s); a working qpt_conv finishes in <1 s.
+   815→  const dotVmdPath = path.join(workDir, 'dotsurface.vmd_plot')
+   816→  try {
+   817→    if (existsSync(dotQpt)) {
+   818→      const feed = Buffer.from('D\ndotsurface.qpt\ndotsurface.vmd_plot\n1\n')
+   819→      const env = { ...process.env }
+   820→      env.PATH = `${VENDOR_BIN}${path.delimiter}${env.PATH ?? ''}`
+   821→      const r = spawnSync(envBin('qpt_conv'), {
+   822→        cwd: workDir,
+   823→        input: feed,
+   824→        env,
+   825→        timeout: 5_000,
+   826→        maxBuffer: 64 * 1024 * 1024,
+   827→        encoding: 'utf-8' as const,
+   828→      })
+   829→      // qpt_conv is supposed to write the output file; if it didn't, capture
+   830→      // its stdout as a fallback (some builds print the vmd commands instead).
+   831→      if (!existsSync(dotVmdPath) && r.stdout) {
+   832→        const keep = r.stdout.split(/\r?\n/).filter((l) => l.startsWith('draw '))
+   833→        if (keep.length > 0) writeFileSync(dotVmdPath, keep.join('\n') + '\n')
+   834→      }
+   835→    }
+   836→  } catch { /* best-effort — ignore */ }
+   837→
+   838→  // 8. Parse the structured data we need for the UI.
+   839→  const allSpheres = parseSphFile(sphPath)
+   840→  const surface = parseSosVmd(vmdPath)
+   841→  const clSpheres = centreLineSpheres(allSpheres)
+   842→
+   843→  // 9. Infer cvec/cpoint via PCA if HOLE masked them with `****************`.
+   844→  if (profile.cvec === null || profile.cpoint === null) {
+   845→    const [inferredCvec, inferredCpoint] = inferChannelAxis(clSpheres)
+   846→    if (profile.cvec === null) profile.cvec = inferredCvec
+   847→    if (profile.cpoint === null) profile.cpoint = inferredCpoint
+   848→  }
+   849→
+   850→  // 10. Sort centre-line spheres by their projection onto cvec so the
+   851→  //     centre-line tube in the 3D viewer runs smoothly along the pore.
+   852→  const [cvx, cvy, cvz] = profile.cvec ?? [0, 0, 1]
+   853→  const [cpx, cpy, cpz] = profile.cpoint ?? [0, 0, 0]
+   854→  const clSorted = [...clSpheres].sort((a, b) => {
+   855→    const pa = (a.x - cpx) * cvx + (a.y - cpy) * cvy + (a.z - cpz) * cvz
+   856→    const pb = (b.x - cpx) * cvx + (b.y - cpy) * cvy + (b.z - cpz) * cvz
+   857→    return pa - pb
+   858→  })
+   859→
+   860→  // 11. Build the summary card.
+   861→  const summary: Record<string, unknown> = {
+   862→    status: 'ok',
+   863→    min_radius: profile.min_radius,
+   864→    min_t: profile.min_t,
+   865→    max_radius: profile.max_radius,
+   866→    pore_length: profile.pore_length,
+   867→    n_samples: profile.n_samples,
+   868→    g_factor: profile.g_factor,
+   869→    g_macro: profile.g_macro,
+   870→    n_spheres: allSpheres.length,
+   871→    n_triangles: surface.triangles.length,
+   872→    cguess_direction: cguessDirection,
+   873→  }
+   874→  if (allSpheres.length > 5000 || surface.triangles.length > 20000) {
+   875→    sosWarning = (sosWarning ? sosWarning + ' ' : '') +
+   876→      'Large result: the sphere/triangle payload sent to the 3D viewer ' +
+   877→      'was capped (5000 spheres / 20000 triangles); download the raw ' +
+   878→      'files for the full data.'
+   879→  }
+   880→
+   881→  return {
+   882→    job_id: jobId,
+   883→    work_dir: workDir,
+   884→    profile,
+   885→    spheres: allSpheres,
+   886→    surface,
+   887→    summary,
+   888→    files: listFiles(workDir),
+   889→    log_tail: out.slice(-3000),
+   890→    returncode: 0,
+   891→    error: null,
+   892→    warnings: sosWarning ? [sosWarning] : [],
+   893→    centreline: clSorted.slice(0, 5000).map((s) => [s.x, s.y, s.z] as [number, number, number]),
+   894→  }
+   895→}
+   896→
+   897→// ---------------------------------------------------------------------------
+   898→// Helpers — examples, rad-sets, downloads, ZIP
+   899→// ---------------------------------------------------------------------------
+   900→
+   901→const EXAMPLE_DESCRIPTIONS: Record<string, string> = {
+   902→  '01_gramicidin_1grm':
+   903→    'Gramicidin A (1GRM) — narrow channel, single-file water wire. The classic HOLE demo.',
+   904→  '02_choleratoxin_1chb':
+   905→    'Cholera toxin B pentamer (1CHB) — large pore, uses the Connolly probe.',
+   906→  '03_maltoporin_1af6':
+   907→    'Maltoporin trimer (1AF6) — sugar channel with explicit CPOINT/CVECT overrides.',
+   908→  '04_trpm8_9pb6':
+   909→    'Avian TRPM8 tetramer (9PB6, menthol-bound cryo-EM) — large multi-domain channel whose ~19 Å central ' +
+   910→    'cavity defeats the default endrad=5 and the cguess auto-direction; runs with explicit CVECT 0 0 1, ' +
+   911→    'CPOINT and endrad 22.',
+   912→}
+   913→
+   914→const EXAMPLE_PARAMS: Record<string, Record<string, string | boolean>> = {
+   915→  '01_gramicidin_1grm': {
+   916→    endrad: '5.0', ignore_residues: '', shorto: '0', dotden: '15',
+   917→  },
+   918→  '02_choleratoxin_1chb': {
+   919→    connolly: true, ignore_residues: 'HOH TIP WAT', shorto: '0', dotden: '5',
+   920→  },
+   921→  '03_maltoporin_1af6': {
+   922→    cvect_x: '0.0', cvect_y: '0.0', cvect_z: '1.0',
+   923→    cpoint_x: '-14.285', cpoint_y: '47.809', cpoint_z: '82.707',
+   924→    ignore_residues: 'FRU GLC MG HOH', shorto: '0', dotden: '15',
+   925→  },
+   926→  // TRPM8 9PB6: the pore runs along the C4 symmetry axis (z) through the
+   927→  // tetramer centre; endrad must exceed the ~19 Å central cavity so HOLE
+   928→  // does not treat the cavity as an immediate pore "end".
+   929→  '04_trpm8_9pb6': {
+   930→    cvect_x: '0.0', cvect_y: '0.0', cvect_z: '1.0',
+   931→    cpoint_x: '209.639', cpoint_y: '209.636', cpoint_z: '202.5',
+   932→    endrad: '22.0', ignore_residues: '', shorto: '0', dotden: '15',
+   933→  },
+   934→}
+   935→
+   936→export interface ExampleInfo {
+   937→  id: string
+   938→  name: string
+   939→  pdb_files: string[]
+   940→  inp_files: string[]
+   941→  description: string
+   942→  params: Record<string, string | boolean>
+   943→}
+   944→
+   945→/** Return all example directories (repo-local examples first, then vendor). */
+   946→export function exampleDirs(): string[] {
+   947→  const seen = new Set<string>()
+   948→  const dirs: string[] = []
+   949→  for (const root of [LOCAL_EXAMPLES, VENDOR_EXAMPLES]) {
+   950→    if (!existsSync(root)) continue
+   951→    let entries: string[] = []
+   952→    try { entries = readdirSync(root) } catch { continue }
+   953→    for (const name of entries.sort()) {
+   954→      if (name.startsWith('000') || seen.has(name)) continue
+   955→      const full = path.join(root, name)
+   956→      try {
+   957→        if (!statSync(full).isDirectory()) continue
+   958→      } catch { continue }
+   959→      seen.add(name)
+   960→      dirs.push(full)
+   961→    }
+   962→  }
+   963→  return dirs
+   964→}
+   965→
+   966→/** List bundled example structures + their recommended parameters. */
+   967→export function listExamples(): ExampleInfo[] {
+   968→  const out: ExampleInfo[] = []
+   969→  for (const d of exampleDirs()) {
+   970→    const name = path.basename(d)
+   971→    let entries: string[] = []
+   972→    try { entries = readdirSync(d) } catch { continue }
+   973→    const pdbFiles = entries.filter((f) => f.endsWith('.pdb')).sort()
+   974→    const inpFiles = entries.filter((f) => f.endsWith('.inp')).sort()
+   975→    out.push({
+   976→      id: name,
+   977→      name,
+   978→      pdb_files: pdbFiles,
+   979→      inp_files: inpFiles,
+   980→      description: EXAMPLE_DESCRIPTIONS[name] ?? '',
+   981→      params: EXAMPLE_PARAMS[name] ?? {},
+   982→    })
+   983→  }
+   984→  return out
+   985→}
+   986→
+   987→/** Resolve an example PDB file path safely (no path traversal). */
+   988→export function resolveExamplePdb(exampleId: string, pdbName: string): string | null {
+   989→  if (!SAFE_NAME_RE.test(exampleId) || !SAFE_NAME_RE.test(pdbName)) return null
+   990→  for (const root of [LOCAL_EXAMPLES, VENDOR_EXAMPLES]) {
+   991→    if (!existsSync(root)) continue
+   992→    const direct = path.join(root, exampleId, pdbName)
+   993→    if (existsSync(direct) && statSync(direct).isFile()) {
+   994→      // Verify the resolved path is still inside root.
+   995→      if (path.relative(root, direct).startsWith('..')) return null
+   996→      return direct
+   997→    }
+   998→    // Prefix-match fallback (e.g. user passes "1grm_single" but file is "1grm_single.pdb").
+   999→    const dir = path.join(root, exampleId)
+  1000→    if (existsSync(dir) && statSync(dir).isDirectory()) {
+  1001→      try {
+  1002→        for (const candidate of readdirSync(dir)) {
+  1003→          if (candidate.startsWith(pdbName) && statSync(path.join(dir, candidate)).isFile()) {
+  1004→            const full = path.join(dir, candidate)
+  1005→            if (path.relative(root, full).startsWith('..')) return null
+  1006→            return full
+  1007→          }
+  1008→        }
+  1009→      } catch { /* ignore */ }
+  1010→    }
+  1011→  }
+  1012→  return null
+  1013→}
+  1014→
+  1015→const RAD_DESCRIPTIONS: Record<string, string> = {
+  1016→  simple:
+  1017→    'Simple AMBER vdw radii — one value per element (C 1.85, O 1.65, N 1.75, etc.). Recommended for most protein channels. From Weiner et al. 1984 JACS.',
+  1018→  amberuni:
+  1019→    'AMBER united-atom radii — treats hydrogens implicitly (merged into heavy atoms). Use for structures without explicit hydrogens. Faster, slightly different radii than simple.rad.',
+  1020→  bondi:
+  1021→    'Bondi radii — widely-used compilation (Bondi 1964). Slightly larger vdW for polar atoms. Good for structures with explicit hydrogens.',
+  1022→  hardcore:
+  1023→    'Hard-sphere radii — smaller vdW (close-packed). Produces narrower pores. Use to test sensitivity to the radius set.',
+  1024→  xplor:
+  1025→    'X-PLOR/CNS radii — matches the X-PLOR simulation package conventions. Use if your structure came from X-PLOR/CNS.',
+  1026→}
+  1027→
+  1028→/** List bundled vdw radius sets with descriptions. */
+  1029→export function listRadSets(): { rad_sets: { name: string; description: string }[]; default: string } {
+  1030→  const names: string[] = []
+  1031→  if (existsSync(VENDOR_RAD)) {
+  1032→    try {
+  1033→      for (const f of readdirSync(VENDOR_RAD)) {
+  1034→        if (f.endsWith('.rad')) names.push(f.replace(/\.rad$/, ''))
+  1035→      }
+  1036→    } catch { /* ignore */ }
+  1037→  }
+  1038→  return {
+  1039→    rad_sets: names.sort().map((n) => ({
+  1040→      name: n,
+  1041→      description: RAD_DESCRIPTIONS[n] ?? 'HOLE2 vdw radius set',
+  1042→    })),
+  1043→    default: 'simple',
+  1044→  }
+  1045→}
+  1046→
+  1047→/** Allowed radius-set names (for validation). */
+  1048→export function allowedRadSets(): Set<string> {
+  1049→  const s = new Set<string>()
+  1050→  if (existsSync(VENDOR_RAD)) {
+  1051→    try {
+  1052→      for (const f of readdirSync(VENDOR_RAD)) {
+  1053→        if (f.endsWith('.rad')) s.add(f.replace(/\.rad$/, ''))
+  1054→      }
+  1055→    } catch { /* ignore */ }
+  1056→  }
+  1057→  return s
+  1058→}
+  1059→
+  1060→/** Validate a job_id (12 hex chars). */
+  1061→export function isValidJobId(jobId: string): boolean {
+  1062→  return JOB_ID_RE.test(jobId)
+  1063→}
+  1064→
+  1065→/** Validate a filename (no path traversal). */
+  1066→export function isSafeFilename(name: string): boolean {
+  1067→  return SAFE_NAME_RE.test(name)
+  1068→}
+  1069→
+  1070→/** Validate an example_id / pdb_name. */
+  1071→export function isSafeName(name: string): boolean {
+  1072→  return SAFE_NAME_RE.test(name)
+  1073→}
+  1074→
+  1075→/** Validate an ignore_residues string (space-separated residue names). */
+  1076→export function isValidIgnoreList(s: string): boolean {
+  1077→  return IGNORE_RE.test(s)
+  1078→}
+  1079→
+  1080→/** List the files (name + size) in a job directory. */
+  1081→export function listJobFiles(jobId: string): { name: string; size: number }[] {
+  1082→  if (!isValidJobId(jobId)) return []
+  1083→  const jobDir = path.join(JOBS_DIR, jobId)
+  1084→  if (!existsSync(jobDir) || !statSync(jobDir).isDirectory()) return []
+  1085→  const out: { name: string; size: number }[] = []
+  1086→  try {
+  1087→    for (const f of readdirSync(jobDir)) {
+  1088→      const full = path.join(jobDir, f)
+  1089→      const st = statSync(full)
+  1090→      if (st.isFile()) out.push({ name: f, size: st.size })
+  1091→    }
+  1092→  } catch { /* ignore */ }
+  1093→  return out.sort((a, b) => a.name.localeCompare(b.name))
+  1094→}
+  1095→
+  1096→/** Resolve a job file path safely (no path traversal). */
+  1097→export function resolveJobFile(jobId: string, filename: string): string | null {
+  1098→  if (!isValidJobId(jobId) || !isSafeFilename(filename)) return null
+  1099→  const jobDir = path.join(JOBS_DIR, jobId)
+  1100→  if (!existsSync(jobDir) || !statSync(jobDir).isDirectory()) return null
+  1101→  const target = path.join(jobDir, filename)
+  1102→  if (path.relative(jobDir, target).startsWith('..')) return null
+  1103→  if (!existsSync(target) || !statSync(target).isFile()) return null
+  1104→  return target
+  1105→}
+  1106→
+  1107→/** Return the path to a job directory (or null if invalid). */
+  1108→export function jobDirPath(jobId: string): string | null {
+  1109→  if (!isValidJobId(jobId)) return null
+  1110→  const p = path.join(JOBS_DIR, jobId)
+  1111→  if (!existsSync(p) || !statSync(p).isDirectory()) return null
+  1112→  return p
+  1113→}
+  1114→
+  1115→// ---------------------------------------------------------------------------
+  1116→// Internal helpers
+  1117→// ---------------------------------------------------------------------------
+  1118→
+  1119→function emptyProfile(): PoreProfile {
+  1120→  return {
+  1121→    cvec: null, cpoint: null, samples: [],
+  1122→    min_radius: null, min_t: null, max_radius: null,
+  1123→    n_samples: 0, g_factor: null, g_macro: null, pore_length: null,
+  1124→  }
+  1125→}
+  1126→
+  1127→function listFiles(dir: string): string[] {
+  1128→  try {
+  1129→    return readdirSync(dir).sort()
+  1130→  } catch {
+  1131→    return []
+  1132→  }
+  1133→}
+  1134→
+  1135→// ---------------------------------------------------------------------------
+  1136→// Job directory sweeper — runs in a setInterval on first import.
+  1137→// Each job can hold a 50 MB PDB + outputs, so we delete dirs older than 24 h.
+  1138→// ---------------------------------------------------------------------------
+  1139→
+  1140→const JOB_MAX_AGE_MS = 24 * 60 * 60 * 1000 // 24 hours
+  1141→const JOB_SWEEP_INTERVAL_MS = 10 * 60 * 1000 // 10 minutes
+  1142→
+  1143→declare global {
+  1144→  var __hole2SweeperStarted: boolean | undefined
+  1145→}
+  1146→
+  1147→/** Recursively delete a directory's contents then the directory itself. */
+  1148→function removeDirRecursive(dir: string): void {
+  1149→  try {
+  1150→    for (const f of readdirSync(dir)) {
+  1151→      const full = path.join(dir, f)
+  1152→      const st = statSync(full)
+  1153→      if (st.isDirectory()) removeDirRecursive(full)
+  1154→      else unlinkSync(full)
+  1155→    }
+  1156→    rmdirSync(dir)
+  1157→  } catch { /* ignore */ }
+  1158→}
+  1159→
+  1160→/** Start the job-dir sweeper exactly once per server process. */
+  1161→export function ensureSweeperStarted(): void {
+  1162→  if (global.__hole2SweeperStarted) return
+  1163→  global.__hole2SweeperStarted = true
+  1164→  const sweep = () => {
+  1165→    try {
+  1166→      if (!existsSync(JOBS_DIR)) return
+  1167→      const now = Date.now()
+  1168→      for (const d of readdirSync(JOBS_DIR)) {
+  1169→        try {
+  1170→          const full = path.join(JOBS_DIR, d)
+  1171→          const st = statSync(full)
+  1172→          if (st.isDirectory() && now - st.mtimeMs > JOB_MAX_AGE_MS) {
+  1173→            removeDirRecursive(full)
+  1174→          }
+  1175→        } catch { /* ignore */ }
+  1176→      }
+  1177→    } catch { /* sweeper must never crash */ }
+  1178→  }
+  1179→  sweep() // run once at startup
+  1180→  const handle = setInterval(sweep, JOB_SWEEP_INTERVAL_MS)
+  1181→  // Don't keep the Node event loop alive just for the sweeper.
+  1182→  if (handle && typeof handle.unref === 'function') handle.unref()
+  1183→}
+  1184→

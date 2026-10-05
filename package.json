@@ -4,8 +4,8 @@
   "private": true,
   "scripts": {
     "dev": "bash scripts/dev-server.sh",
-    "build": "next build && cp -r .next/static .next/standalone/.next/ && cp -r public .next/standalone/",
-    "start": "cd .next/standalone && PORT=3000 node server.js",
+    "build": "next build",
+    "start": "next start -p 3000",
     "lint": "eslint .",
     "db:push": "prisma db push --accept-data-loss",
     "db:generate": "prisma generate",

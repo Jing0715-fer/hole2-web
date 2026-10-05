@@ -1,9 +1,0 @@
-{
-  "name": "hole2-service",
-  "version": "1.0.0",
-  "description": "Python FastAPI mini-service that wraps the HOLE2 (hole/sph_process/sos_triangle/qpt_conv) command-line suite. Provides REST endpoints to run HOLE on a PDB file with parameters and returns the raw output files plus parsed pore-profile data for the web UI.",
-  "scripts": {
-    "dev": "bash start.sh",
-    "start": "bash start.sh"
-  }
-}

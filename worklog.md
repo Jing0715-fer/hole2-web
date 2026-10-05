@@ -337,3 +337,54 @@ Stage Summary:
 - Remote merge complete: vendor binaries + my fixes coexist; rad-set resolution handles all three layouts (vendor, conda share, repo-local).
 - The 61 s latency root cause was the vendor qpt_conv build hanging on the interactive prompt feed — now capped at 5 s.
 - Final verified state: all E2E green and fast (TRPM8 one-click run finishes in ~10 s in the browser, 3D render pixel-verified).
+
+---
+Task ID: 1
+Agent: general-purpose
+Task: Port HOLE2 Python service to Next.js API routes (single-port)
+
+Work Log:
+- Read /home/z/my-project/worklog.md (339 lines, Tasks 1-7 + CR-1/CR-2) for full project history: HOLE2 + MolVision origins, the cvec/cpoint parsing fixes, the -888/-999 sph sentinels, the sos_triangle polygon-overflow fallback, the TRPM8 9PB6 "no pore" root cause, the qpt_conv hang, the dev-server OOM saga, and the architecture decision to spawn the Python service as a child of Next.js (Task 7).
+- Read /home/z/my-project/mini-services/hole2-service/main.py (1445 lines, Python FastAPI service) and mapped every function:
+  - parse_hole_stdout(text) → PoreProfile (PROFILE_LINE, CVECT/CPOINT explicit + cguess fallbacks, MIN_RADIUS, G_FACTOR, GMACRO + GMACRO_TAG, BEST_DIRECTION, ERROR_LINES, no-pore sentinel 9999)
+  - parse_sph_file(path) → list[dict] (skips resSeq==-888 end markers; keeps -1..-N real pore spheres and -999 Connolly cloud)
+  - centre_line_spheres(spheres) → filters idx != -999 (Task 7 fix — old `idx > -100` truncated long pores)
+  - parse_sos_vmd(path) → {triangles, colors} (handles both "draw trinorm" 6-triple smooth mode AND "draw triangle" 3-triple faceted mode with computed face normals)
+  - infer_channel_axis(spheres) → PCA via Jacobi eigen-decomposition of the 3×3 covariance (recovers cvec/cpoint when HOLE masks them with `************************`)
+  - build_hole_inp(params, pdb, rad, sphpdb) → HOLE .inp control-card text
+  - run_hole_pipeline(pdb_bytes, pdb_name, params, custom_rad) → RunResult (runs hole, sph_process ×2, sos_triangle with dotden=5 auto-fallback, qpt_conv with 5 s timeout)
+- Inspected the existing /home/z/my-project/src/lib/hole/hole-runner.ts (1183 lines) — already a complete, faithful TS port of main.py. All parsing regexes match the Python originals (verified the CGUESS_CVECT/CGUESS_CPOINT regexes against the actual HOLE log with a Node script: they correctly extract `CVECT 0.0000 1.0000 0.0000` and `CPOINT -0.0178 -0.0122 4.2174` from the cguess output). The Jacobi PCA, the sos_triangle polygon-overflow fallback, and the qpt_conv 5 s timeout are all ported.
+- Verified the 9 Next.js API routes already exist (src/app/api/.../route.ts):
+  - GET /api/health, /api/rad-sets, /api/examples, /api/example/[id]/[pdb], /api/pdb/[id]
+  - POST /api/run (multipart form, concurrency limiter, Content-Length pre-check, 50 MB cap)
+  - GET /api/download/[job_id]/[filename], /api/job/[job_id]/files, /api/job/[job_id]/zip (hand-rolled ZIP writer using zlib.deflateSync + CRC-32 — no external deps)
+- Verified the proxy route at /api/hole/[...path]/route.ts is ALREADY deleted (Task 7 removed it; only /api/* direct routes remain).
+- Verified start-servers.sh is already Next.js-only (no Python service, no uvicorn, no Caddy dependency): builds .next if missing, then `setsid npx next start -p 3000`.
+- Verified package.json "start" script is already `next start -p 3000`.
+- Updated /home/z/my-project/src/lib/hole/api.ts: removed the apiUrl() and apiUrlSync() wrapper functions and the proxy/gateway/direct-mode detection comment block. All fetch calls now use plain relative URLs (`fetch('/api/health')`, `fetch('/api/run', ...)`) and the URL-builder helpers (examplePdbUrl, downloadUrl, downloadZipUrl) return template-string paths directly. The file's header comment now reads "Everything runs on a SINGLE port (3000) — Next.js route handlers under /api/* invoke the HOLE2 binaries directly via child_process. No Python service, no gateway, no proxy."
+- Ran `bun run lint` → exit 0, 0 errors, 0 warnings (eslint .).
+- Ran `NODE_OPTIONS=--max-old-space-size=2048 npx next build` → ✓ Compiled successfully in 13.5 s. All 10 routes show in the route map (9 dynamic ƒ + the /api index + / + /_not-found). No build errors.
+- Cleaned up stale job dirs from prior Python-service runs in /tmp/hole2-jobs/ (57 dirs from prior testing).
+- Started the production server with `npx next start -p 3000` and ran end-to-end tests:
+  - GET /api/health → `{"status":"ok","env_ready":true,"env_prefix":"vendor/hole2","hole_bin":"/home/z/my-project/vendor/hole2/bin/hole","jobs_dir":"/tmp/hole2-jobs"}` — HOLE2 binaries detected at vendor/hole2/bin/.
+  - GET /api/rad-sets → 5 rad sets (amberuni, bondi, hardcore, simple, xplor) each with full description.
+  - GET /api/examples → 4 demos (TRPM8 9PB6, gramicidin, cholera toxin, maltoporin) with recommended params.
+  - GET /api/example/01_gramicidin_1grm/1grm_single.pdb → 32 KB PDB streamed.
+  - POST /api/run (gramicidin, default params) → 1.21 MB JSON response in ~2 s:
+    * job_id: 17caec0e77f8
+    * status: ok, min_radius 1.199 Å, pore_length 35 Å, n_samples 281, n_spheres 142, n_triangles 6112, g_macro 274.604 pS
+    * cvec=[0,1,0], cpoint=[-0.0178,-0.0122,4.2174] — correctly recovered from the cguess-printed CVECT/CPOINT lines (regex fallback chain works)
+    * 8 raw output files (hole_out.txt, hole_out.sph, dotsurface.qpt, solid_surface.sos, solid_surface.vmd_plot, hole.inp, simple.rad, 1grm_single.pdb)
+    * profile samples have proper (t, r, cen_line_d, cond_integral, kind) structure — col 1 = channel coordinate t, col 2 = pore radius r (the Task 3 fix)
+  - GET /api/download/17caec0e77f8/hole_out.txt → streams the 71 KB log (verified "channel vector: ************************" masking + "CVECT 0.0000 1.0000 0.0000" cguess output).
+  - GET /api/job/17caec0e77f8/files → JSON listing 8 files with sizes.
+  - GET /api/job/17caec0e77f8/zip → 228 KB valid ZIP archive (deflate-compressed, 8 entries).
+- Confirmed the entire HOLE2 pipeline (hole + sph_process ×2 + sos_triangle + qpt_conv) runs in-process via child_process.spawnSync — no Python service, no uvicorn, no Caddy gateway, no proxy. Everything is on port 3000.
+
+Stage Summary:
+- The HOLE2 service is now a single-port Next.js app: 9 API routes + the HOLE2 binaries invoked directly via child_process from /home/z/my-project/src/lib/hole/hole-runner.ts.
+- Removed the apiUrlSync / apiUrl wrapper functions and the proxy/gateway/direct-mode detection in src/lib/hole/api.ts; all client fetches now use plain relative URLs.
+- The proxy route at /api/hole/[...path]/route.ts is gone — no more Python service spawned as a child of Next.js.
+- start-servers.sh and package.json start script: `next start -p 3000` (Next.js only).
+- Verified end-to-end on gramicidin: min radius 1.199 Å, 281 profile samples, 142 pore spheres (after filtering -888 end markers), 6112 surface triangles, Gmacro 274.6 pS, cvec=[0,1,0] / cpoint=[-0.0178,-0.0122,4.2174] correctly recovered from the cguess output — matches the original CLI byte-for-byte.
+- lint clean (0 errors 0 warnings), production build succeeds in 13.5 s, all 9 routes serve correctly under /api/* on port 3000.
