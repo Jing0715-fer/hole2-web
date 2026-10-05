@@ -1,18 +1,78 @@
 /**
  * Front-end API client for the HOLE2 Python mini-service (port 3001).
  *
- * All requests go through the Caddy gateway with the XTransformPort
- * query param so the relative paths work from the browser.
+ * Three modes of operation (auto-detected):
+ * 1. Caddy gateway (sandbox): requests use ?XTransformPort=3001
+ * 2. Direct: requests go to http://localhost:3001/api/...
+ * 3. Next.js proxy fallback: /api/hole/health → http://localhost:3001/api/health
+ *    (used when direct access fails due to CORS)
  */
 
 import type { RunParams, RunResult, OutputFile } from './types'
 
 const SERVICE_PORT = 3001
 
-function apiUrl(path: string) {
-  // Route through Caddy (port 81) with the XTransformPort query
-  const sep = path.includes('?') ? '&' : '?'
-  return `${path}${sep}XTransformPort=${SERVICE_PORT}`
+type Mode = 'gateway' | 'direct' | 'proxy'
+let _mode: Mode | null = null
+
+async function detectMode(): Promise<Mode> {
+  if (_mode !== null) return _mode
+  if (typeof window === 'undefined') return 'proxy'
+
+  const host = window.location.hostname
+  // Sandbox preview domains → always use gateway
+  if (host.includes('space-z.ai') || host.includes('preview-chat')) {
+    _mode = 'gateway'
+    return 'gateway'
+  }
+
+  // For localhost/other hosts:
+  // 1. Try gateway (Caddy on port 81)
+  try {
+    const r = await fetch(`/api/health?XTransformPort=${SERVICE_PORT}`, { signal: AbortSignal.timeout(1500) })
+    if (r.ok) { _mode = 'gateway'; return 'gateway' }
+  } catch { /* not available */ }
+
+  // 2. Try direct port 3001
+  try {
+    const r = await fetch(`http://localhost:${SERVICE_PORT}/api/health`, { signal: AbortSignal.timeout(1500) })
+    if (r.ok) { _mode = 'direct'; return 'direct' }
+  } catch { /* not available */ }
+
+  // 3. Fall back to Next.js proxy
+  _mode = 'proxy'
+  return 'proxy'
+}
+
+function buildUrl(path: string, mode: Mode): string {
+  switch (mode) {
+    case 'gateway': {
+      const sep = path.includes('?') ? '&' : '?'
+      return `${path}${sep}XTransformPort=${SERVICE_PORT}`
+    }
+    case 'direct':
+      return `http://localhost:${SERVICE_PORT}${path}`
+    case 'proxy':
+      // /api/health → /api/hole/health (proxied by Next.js route handler)
+      return path.replace(/^\/api\//, '/api/hole/')
+  }
+}
+
+export async function apiUrl(path: string): Promise<string> {
+  const mode = await detectMode()
+  return buildUrl(path, mode)
+}
+
+/** Synchronous version for href attributes. */
+export function apiUrlSync(path: string): string {
+  if (typeof window !== 'undefined') {
+    const host = window.location.hostname
+    if (host.includes('space-z.ai') || host.includes('preview-chat')) {
+      return buildUrl(path, 'gateway')
+    }
+  }
+  // Default to proxy for sync URLs (download links etc.)
+  return buildUrl(path, 'proxy')
 }
 
 export interface RadSetInfo {
@@ -37,19 +97,19 @@ export interface ExampleInfo {
 }
 
 export async function fetchHealth(): Promise<{ status: string; env_ready: boolean }> {
-  const r = await fetch(apiUrl('/api/health'))
+  const r = await fetch(await apiUrl('/api/health'))
   if (!r.ok) throw new Error(`health: ${r.status}`)
   return r.json()
 }
 
 export async function fetchRadSets(): Promise<RadSetInfo> {
-  const r = await fetch(apiUrl('/api/rad-sets'))
+  const r = await fetch(await apiUrl('/api/rad-sets'))
   if (!r.ok) throw new Error(`rad-sets: ${r.status}`)
   return r.json()
 }
 
 export async function fetchExamples(): Promise<ExampleInfo[]> {
-  const r = await fetch(apiUrl('/api/examples'))
+  const r = await fetch(await apiUrl('/api/examples'))
   if (!r.ok) throw new Error(`examples: ${r.status}`)
   const d = await r.json()
   return d.examples ?? []
@@ -58,7 +118,7 @@ export async function fetchExamples(): Promise<ExampleInfo[]> {
 /** Build the URL for fetching an example PDB file (so the front-end can
  *  one-click load the gramicidin / cholera-toxin / maltoporin demos). */
 export function examplePdbUrl(exampleId: string, pdbName: string): string {
-  return apiUrl(`/api/example/${encodeURIComponent(exampleId)}/${encodeURIComponent(pdbName)}`)
+  return apiUrlSync(`/api/example/${encodeURIComponent(exampleId)}/${encodeURIComponent(pdbName)}`)
 }
 
 /** Fetch a structure from RCSB by its 4-character PDB ID (e.g. "1grm").
@@ -69,7 +129,7 @@ export async function fetchPdbId(pdbId: string): Promise<PdbFetchResult> {
   if (!/^[a-z0-9]{4}$/.test(pid)) {
     throw new Error('PDB ID must be exactly 4 alphanumeric characters (e.g. 1grm)')
   }
-  const r = await fetch(apiUrl(`/api/pdb/${encodeURIComponent(pid)}`))
+  const r = await fetch(await apiUrl(`/api/pdb/${encodeURIComponent(pid)}`))
   if (!r.ok) {
     let msg = `RCSB fetch failed: HTTP ${r.status}`
     try {
@@ -83,18 +143,18 @@ export async function fetchPdbId(pdbId: string): Promise<PdbFetchResult> {
 
 /** Build the URL for downloading a raw output file. */
 export function downloadUrl(jobId: string, filename: string): string {
-  return apiUrl(`/api/download/${encodeURIComponent(jobId)}/${encodeURIComponent(filename)}`)
+  return apiUrlSync(`/api/download/${encodeURIComponent(jobId)}/${encodeURIComponent(filename)}`)
 }
 
 /** Build the URL for downloading all output files as a ZIP archive. */
 export function downloadZipUrl(jobId: string): string {
-  return apiUrl(`/api/job/${encodeURIComponent(jobId)}/zip`)
+  return apiUrlSync(`/api/job/${encodeURIComponent(jobId)}/zip`)
 }
 
 export interface JobFile { name: string; size: number }
 
 export async function fetchJobFiles(jobId: string): Promise<JobFile[]> {
-  const r = await fetch(apiUrl(`/api/job/${encodeURIComponent(jobId)}/files`))
+  const r = await fetch(await apiUrl(`/api/job/${encodeURIComponent(jobId)}/files`))
   if (!r.ok) throw new Error(`job files: ${r.status}`)
   const d = await r.json()
   return d.files ?? []
@@ -125,7 +185,7 @@ export async function runHole(
   form.append('dotden', params.dotden || '15')
   form.append('smooth_surface', params.smooth_surface ? 'true' : 'false')
 
-  const r = await fetch(apiUrl('/api/run'), { method: 'POST', body: form })
+  const r = await fetch(await apiUrl('/api/run'), { method: 'POST', body: form })
   if (!r.ok) {
     let msg = `HOLE2 run failed: HTTP ${r.status}`
     try {
