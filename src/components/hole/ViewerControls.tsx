@@ -1,6 +1,6 @@
 'use client'
 
-import { Eye, EyeOff, Layers, LineChart, Activity, Camera } from 'lucide-react'
+import { Eye, EyeOff, Layers, LineChart, Activity, Camera, Route } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Switch } from '@/components/ui/switch'
 import { Slider } from '@/components/ui/slider'
@@ -13,6 +13,8 @@ interface ViewerControlsProps {
   options: HoleViewerOptions
   onChange: (next: HoleViewerOptions) => void
   onCapturePNG: () => void
+  /** 'hole' shows HOLE-specific layers; 'caver' shows the CAVER tunnels toggle. */
+  mode?: 'hole' | 'caver'
 }
 
 interface ToggleProps {
@@ -38,7 +40,7 @@ function Toggle({ icon, label, checked, onChange, hint }: ToggleProps) {
   )
 }
 
-export function ViewerControls({ options, onChange, onCapturePNG }: ViewerControlsProps) {
+export function ViewerControls({ options, onChange, onCapturePNG, mode = 'hole' }: ViewerControlsProps) {
   const set = (patch: Partial<HoleViewerOptions>) => onChange({ ...options, ...patch })
 
   return (
@@ -54,14 +56,21 @@ export function ViewerControls({ options, onChange, onCapturePNG }: ViewerContro
           checked={options.showCartoon} onChange={(v) => set({ showCartoon: v })} />
         <Toggle icon={<Eye className="size-4" />} label="Ball & stick" hint="Ligands + hetero atoms"
           checked={options.showBallStick} onChange={(v) => set({ showBallStick: v })} />
-        <Toggle icon={<Activity className="size-4" />} label="HOLE surface" hint="Triangulated pore wall"
-          checked={options.showSurface} onChange={(v) => set({ showSurface: v })} />
-        <Toggle icon={<LineChart className="size-4" />} label="Centre line" hint="Pore centre-line tube"
-          checked={options.showCentreLine} onChange={(v) => set({ showCentreLine: v })} />
-        <Toggle icon={<EyeOff className="size-4" />} label="Pore side chains" hint="Residues lining the pore (≤6 Å)"
-          checked={options.showPoreSideChains} onChange={(v) => set({ showPoreSideChains: v })} />
-        <Toggle icon={<EyeOff className="size-4" />} label="Sampled spheres" hint="Pore probe spheres"
-          checked={options.showSpheres} onChange={(v) => set({ showSpheres: v })} />
+        {mode === 'caver' ? (
+          <Toggle icon={<Route className="size-4" />} label="CAVER tunnels" hint="Access tunnels + starting point"
+            checked={options.showTunnels} onChange={(v) => set({ showTunnels: v })} />
+        ) : (
+          <>
+            <Toggle icon={<Activity className="size-4" />} label="HOLE surface" hint="Triangulated pore wall"
+              checked={options.showSurface} onChange={(v) => set({ showSurface: v })} />
+            <Toggle icon={<LineChart className="size-4" />} label="Centre line" hint="Pore centre-line tube"
+              checked={options.showCentreLine} onChange={(v) => set({ showCentreLine: v })} />
+            <Toggle icon={<EyeOff className="size-4" />} label="Pore side chains" hint="Residues lining the pore (≤6 Å)"
+              checked={options.showPoreSideChains} onChange={(v) => set({ showPoreSideChains: v })} />
+            <Toggle icon={<EyeOff className="size-4" />} label="Sampled spheres" hint="Pore probe spheres"
+              checked={options.showSpheres} onChange={(v) => set({ showSpheres: v })} />
+          </>
+        )}
 
         <div className="space-y-1.5 pt-1">
           <div className="flex items-center justify-between">

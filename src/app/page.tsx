@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Boxes, Github, ExternalLink, BookOpen, Activity, BoxSelect,
-  Loader2, AlertCircle, FileDown,
+  Loader2, AlertCircle, FileDown, Route, Box as BoxIcon, Crosshair,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -14,6 +14,8 @@ import { ViewerControls } from '@/components/hole/ViewerControls'
 import { ProfileChart } from '@/components/hole/ProfileChart'
 import { ResultsPanel } from '@/components/hole/ResultsPanel'
 import { HistoryPanel } from '@/components/hole/HistoryPanel'
+import { CaverRunForm } from '@/components/caver/CaverRunForm'
+import { CaverResultsPanel } from '@/components/caver/CaverResultsPanel'
 import { DEFAULT_PARAMS, type RunParams, type RunResult, type HoleSphere, type HoleSurface } from '@/lib/hole/types'
 import type { HoleViewerOptions } from '@/components/hole/Viewer3D'
 import {
@@ -21,6 +23,10 @@ import {
   type ExampleInfo, type RadSetInfo,
 } from '@/lib/hole/api'
 import { loadHistory, addToHistory, removeFromHistory, clearHistory, type HistoryEntry } from '@/lib/hole/history'
+import { DEFAULT_CAVER_PARAMS, type CaverParams, type CaverResult, CAVER_CLUSTER_COLORS } from '@/lib/caver/types'
+import { runCaverAnalysis } from '@/lib/caver/api'
+
+type AnalysisMode = 'hole' | 'caver'
 
 const EMPTY_SURFACE: HoleSurface = { triangles: [], colors: [] }
 
@@ -55,10 +61,21 @@ export default function Home() {
     showSpheres: false,
     showCentreLine: true,
     showPoreSideChains: true,
+    showTunnels: true,
     surfaceOpacity: 1.0,
     sphereScale: 1.0,
   })
   const viewerRef = useRef<{ capturePNG: () => string; highlightPorePosition?: (t: number | null) => void } | null>(null)
+
+  // Analysis mode: HOLE2 (pore profile) or CAVER (access tunnels)
+  const [mode, setMode] = useState<AnalysisMode>('hole')
+
+  // CAVER state
+  const [caverParams, setCaverParams] = useState<CaverParams>(DEFAULT_CAVER_PARAMS)
+  const [caverResult, setCaverResult] = useState<CaverResult | null>(null)
+  const [caverError, setCaverError] = useState<string | null>(null)
+  const [caverRunning, setCaverRunning] = useState(false)
+  const [pickMode, setPickMode] = useState(false)
 
   // Fetch backend metadata on mount — retry every 3s until the service is ready
   // Also load run history from localStorage
@@ -191,7 +208,72 @@ export default function Home() {
     setPdbFile(null); setPdbName(''); setPdbText(null)
     setCustomRad(null)
     setResult(null); setError(null)
+    setCaverResult(null); setCaverError(null)
+    setCaverParams(DEFAULT_CAVER_PARAMS)
   }, [])
+
+  // CAVER run handler
+  const handleCaverRun = useCallback(async () => {
+    if (!pdbFile) { toast.error('Please upload or select a PDB structure first.'); return }
+    setCaverRunning(true)
+    setCaverError(null)
+    setCaverResult(null)
+    try {
+      const res = await runCaverAnalysis(pdbFile, pdbName || 'input.pdb', caverParams)
+      setCaverResult(res)
+      if (res.error || res.tunnels.length === 0) {
+        toast.error(res.error || 'CAVER found no tunnels — try adjusting the starting point or probe radius.')
+      } else {
+        toast.success(`CAVER done: ${res.summary.n_tunnels} tunnels in ${res.summary.n_clusters} clusters`)
+      }
+    } catch (e) {
+      setCaverError((e as Error).message)
+      toast.error((e as Error).message)
+    } finally {
+      setCaverRunning(false)
+    }
+  }, [pdbFile, pdbName, caverParams])
+
+  // Listen for "pick starting point" mode from the CaverRunForm
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const ce = e as CustomEvent
+      setPickMode(ce.detail?.active ?? false)
+    }
+    window.addEventListener('caver-pick-starting-point', handler)
+    return () => window.removeEventListener('caver-pick-starting-point', handler)
+  }, [])
+
+  // When pick mode is active, clicking on the 3D viewer picks a starting point
+  // We intercept the viewer's middle-click handler via a window event
+  useEffect(() => {
+    if (!pickMode) return
+    const handleViewerClick = (e: MouseEvent) => {
+      const viewer = viewerRef.current as any
+      if (!viewer) return
+      // Use the viewer's raycaster to find the clicked 3D position
+      try {
+        const hit = (viewer as any).raycastFromMouse?.(e)
+        if (hit?.point) {
+          const { x, y, z } = hit.point
+          setCaverParams(prev => ({
+            ...prev,
+            start_x: x.toFixed(2),
+            start_y: y.toFixed(2),
+            start_z: z.toFixed(2),
+          }))
+          window.dispatchEvent(new CustomEvent('caver-point-picked', {
+            detail: { x, y, z },
+          }))
+          setPickMode(false)
+          toast.success(`Starting point set to (${x.toFixed(2)}, ${y.toFixed(2)}, ${z.toFixed(2)})`)
+        }
+      } catch { /* ignore */ }
+    }
+    const canvas = document.querySelector('canvas')
+    canvas?.addEventListener('click', handleViewerClick)
+    return () => canvas?.removeEventListener('click', handleViewerClick)
+  }, [pickMode])
 
   // Fetch a structure from RCSB by its 4-character PDB ID.
   // The Python service proxies the request (avoids CORS) and returns the
@@ -298,42 +380,80 @@ export default function Home() {
       {/* Main content */}
       <main className="mx-auto w-full max-w-[1600px] flex-1 px-6 py-8">
         {/* Hero */}
-        <section className="mb-8">
+        <section className="mb-6">
           <div className="flex items-center gap-3 mb-3">
-            <Badge variant="secondary" className="font-mono text-xs">HOLE2 2.3.1</Badge>
-            <span className="text-xs text-muted-foreground/70">Smart, Goodfellow & Wallace, 1996</span>
+            <Badge variant="secondary" className="font-mono text-xs">HOLE2 2.3.1 + CAVER 3.0.3</Badge>
+            <span className="text-xs text-muted-foreground/70">Smart 1996 · Chovancek 2012</span>
           </div>
           <h2 className="text-3xl font-bold tracking-tight sm:text-4xl">
-            Analyse the pore dimensions of ion channels
+            Pore & tunnel analysis studio
           </h2>
           <p className="mt-3 max-w-2xl text-sm text-muted-foreground">
-            Upload a structure, configure the pore probe, and HOLE2 computes the maximum-radius sphere
-            that fits at each point along the pore. Visualise the triangulated pore surface in 3D,
-            inspect the radius profile, and download the original CLI output files.
+            Upload a structure, choose an analysis mode, and get interactive 3D visualisation +
+            downloadable CLI output files. HOLE2 traces a single pore; CAVER discovers access tunnels.
           </p>
+
+          {/* Mode switcher */}
+          <div className="mt-4 inline-flex rounded-lg border border-border/60 bg-muted/30 p-1">
+            <button
+              className={`flex items-center gap-1.5 rounded-md px-4 py-1.5 text-xs font-medium transition-colors ${
+                mode === 'hole' ? 'bg-emerald-500 text-white shadow-sm' : 'text-muted-foreground hover:text-foreground'
+              }`}
+              onClick={() => setMode('hole')}
+            >
+              <Activity className="size-3.5" /> HOLE2 · Pore profile
+            </button>
+            <button
+              className={`flex items-center gap-1.5 rounded-md px-4 py-1.5 text-xs font-medium transition-colors ${
+                mode === 'caver' ? 'bg-emerald-500 text-white shadow-sm' : 'text-muted-foreground hover:text-foreground'
+              }`}
+              onClick={() => setMode('caver')}
+            >
+              <Route className="size-3.5" /> CAVER · Access tunnels
+            </button>
+          </div>
+          {pickMode && (
+            <div className="mt-2 rounded-md border border-amber-400/40 bg-amber-50/50 px-3 py-1.5 text-xs text-amber-600 dark:bg-amber-950/20 dark:text-amber-400">
+              <Crosshair className="mr-1.5 inline size-3" />
+              Click on the 3D structure to set the CAVER starting point
+            </div>
+          )}
         </section>
 
         {/* Main 3-column grid */}
         <div className="grid gap-5 lg:grid-cols-[360px_1fr_300px]">
-          {/* Left: run form */}
+          {/* Left: run form — HOLE2 or CAVER depending on mode */}
           <div className="min-w-0 space-y-4">
-            <RunForm
-              params={params}
-              onParamsChange={setParams}
-              pdbFile={pdbFile}
-              pdbName={pdbName}
-              onPdbFile={(f, n) => { setPdbFile(f); setPdbName(n) }}
-              customRad={customRad}
-              onCustomRad={setCustomRad}
-              radSets={radSets}
-              examples={examples}
-              onPickExample={handlePickExample}
-              onFetchPdbId={handleFetchPdbId}
-              fetchingPdb={fetchingPdb}
-              onRun={handleRun}
-              onReset={handleReset}
-              running={running}
-            />
+            {mode === 'hole' ? (
+              <RunForm
+                params={params}
+                onParamsChange={setParams}
+                pdbFile={pdbFile}
+                pdbName={pdbName}
+                onPdbFile={(f, n) => { setPdbFile(f); setPdbName(n) }}
+                customRad={customRad}
+                onCustomRad={setCustomRad}
+                radSets={radSets}
+                examples={examples}
+                onPickExample={handlePickExample}
+                onFetchPdbId={handleFetchPdbId}
+                fetchingPdb={fetchingPdb}
+                onRun={handleRun}
+                onReset={handleReset}
+                running={running}
+              />
+            ) : (
+              <CaverRunForm
+                params={caverParams}
+                onParamsChange={setCaverParams}
+                pdbFile={pdbFile}
+                pdbName={pdbName}
+                onPdbFile={(f, n) => { setPdbFile(f); setPdbName(n) }}
+                onRun={handleCaverRun}
+                onReset={handleReset}
+                running={caverRunning}
+              />
+            )}
           </div>
 
           {/* Middle: 3D viewer + profile chart */}
@@ -344,10 +464,12 @@ export default function Home() {
                 <Viewer3D
                   pdbText={pdbText}
                   pdbName={pdbName}
-                  spheres={spheres}
-                  surface={surface}
-                  centreline={centreline}
-                  profile={profile}
+                  spheres={mode === 'hole' ? spheres : []}
+                  surface={mode === 'hole' ? surface : EMPTY_SURFACE}
+                  centreline={mode === 'hole' ? centreline : []}
+                  profile={mode === 'hole' ? profile : undefined}
+                  caverTunnels={mode === 'caver' && caverResult ? caverResult.tunnels : undefined}
+                  caverStartingPoint={mode === 'caver' && caverResult ? caverResult.starting_point : undefined}
                   options={viewerOpts}
                   bgColor="#0a0e1a"
                   onReady={(v) => { viewerRef.current = v }}
@@ -373,23 +495,47 @@ export default function Home() {
                   </div>
                 </div>
               )}
+              {caverRunning && (
+                <div className="absolute inset-0 flex items-center justify-center bg-slate-950/60 backdrop-blur-sm">
+                  <div className="flex flex-col items-center gap-3">
+                    <div className="flex size-12 items-center justify-center rounded-full bg-emerald-500/10">
+                      <Loader2 className="size-6 animate-spin text-emerald-500" />
+                    </div>
+                    <p className="text-sm font-medium text-slate-200">Searching tunnels…</p>
+                  </div>
+                </div>
+              )}
             </div>
 
-            {/* Pore profile chart */}
+            {/* Pore profile chart (HOLE mode) or tunnel summary (CAVER mode) */}
             <div className="h-[28vh] min-h-[200px] rounded-2xl border border-slate-200/60 bg-white p-4 shadow-sm dark:border-slate-800/60 dark:bg-slate-900">
-              {profile ? (
-                <ProfileChart profile={profile} onHover={(t) => {
-                  const v = viewerRef.current as any
-                  if (v && v.highlightPorePosition) v.highlightPorePosition(t)
-                }} />
+              {mode === 'hole' ? (
+                profile ? (
+                  <ProfileChart profile={profile} onHover={(t) => {
+                    const v = viewerRef.current as any
+                    if (v && v.highlightPorePosition) v.highlightPorePosition(t)
+                  }} />
+                ) : (
+                  <div className="flex h-full flex-col items-center justify-center gap-3 text-center">
+                    <div className="flex size-12 items-center justify-center rounded-xl bg-slate-100 dark:bg-slate-800">
+                      <Activity className="size-6 text-slate-400" />
+                    </div>
+                    <div>
+                      <p className="text-sm font-medium text-muted-foreground">No profile yet</p>
+                      <p className="text-xs text-muted-foreground/70">Run HOLE2 to see the pore-radius plot</p>
+                    </div>
+                  </div>
+                )
+              ) : caverResult && caverResult.clusters.length > 0 ? (
+                <CaverClusterChart clusters={caverResult.clusters} />
               ) : (
                 <div className="flex h-full flex-col items-center justify-center gap-3 text-center">
                   <div className="flex size-12 items-center justify-center rounded-xl bg-slate-100 dark:bg-slate-800">
-                    <Activity className="size-6 text-slate-400" />
+                    <Route className="size-6 text-slate-400" />
                   </div>
                   <div>
-                    <p className="text-sm font-medium text-muted-foreground">No profile yet</p>
-                    <p className="text-xs text-muted-foreground/70">Run HOLE2 to see the pore-radius plot</p>
+                    <p className="text-sm font-medium text-muted-foreground">No tunnels yet</p>
+                    <p className="text-xs text-muted-foreground/70">Run CAVER to see access tunnels</p>
                   </div>
                 </div>
               )}
@@ -397,14 +543,20 @@ export default function Home() {
 
             {/* Mobile/tablet results + history */}
             <div className="lg:hidden space-y-4">
-              <ResultsPanel result={result} loading={running} error={error} />
-              <HistoryPanel
-                entries={history}
-                selectedIds={selectedHistoryIds}
-                onToggleSelect={handleToggleHistorySelect}
-                onRemove={handleRemoveHistory}
-                onClear={handleClearHistory}
-              />
+              {mode === 'hole' ? (
+                <ResultsPanel result={result} loading={running} error={error} />
+              ) : (
+                <CaverResultsPanel result={caverResult} loading={caverRunning} error={caverError} />
+              )}
+              {mode === 'hole' && (
+                <HistoryPanel
+                  entries={history}
+                  selectedIds={selectedHistoryIds}
+                  onToggleSelect={handleToggleHistorySelect}
+                  onRemove={handleRemoveHistory}
+                  onClear={handleClearHistory}
+                />
+              )}
             </div>
           </div>
 
@@ -414,15 +566,22 @@ export default function Home() {
               options={viewerOpts}
               onChange={setViewerOpts}
               onCapturePNG={handleCapturePNG}
+              mode={mode}
             />
-            <ResultsPanel result={result} loading={running} error={error} />
-            <HistoryPanel
-              entries={history}
-              selectedIds={selectedHistoryIds}
-              onToggleSelect={handleToggleHistorySelect}
-              onRemove={handleRemoveHistory}
-              onClear={handleClearHistory}
-            />
+            {mode === 'hole' ? (
+              <ResultsPanel result={result} loading={running} error={error} />
+            ) : (
+              <CaverResultsPanel result={caverResult} loading={caverRunning} error={caverError} />
+            )}
+            {mode === 'hole' && (
+              <HistoryPanel
+                entries={history}
+                selectedIds={selectedHistoryIds}
+                onToggleSelect={handleToggleHistorySelect}
+                onRemove={handleRemoveHistory}
+                onClear={handleClearHistory}
+              />
+            )}
           </div>
         </div>
       </main>
@@ -433,7 +592,7 @@ export default function Home() {
           <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
             <span className="flex items-center gap-1.5">
               <Activity className="size-3.5" />
-              HOLE2 web app · wrapping the original Fortran suite
+              HOLE2 + CAVER web app · wrapping the original Fortran + Java suites
             </span>
             <span className="opacity-40">·</span>
             <span>3D viewer with <strong className="text-foreground">three.js</strong>, inspired by <a href="https://github.com/Jing0715-fer/MolVision" target="_blank" rel="noreferrer" className="underline hover:text-foreground">MolVision</a></span>
@@ -443,12 +602,56 @@ export default function Home() {
               <BookOpen className="size-3.5" /> holeprogram.org
             </a>
             <span className="opacity-40">·</span>
-            <span className="inline-flex items-center gap-1">
-              <FileDown className="size-3.5" /> Outputs match CLI byte-for-byte
-            </span>
+            <a href="https://www.caver.cz/" target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 hover:text-foreground">
+              <Route className="size-3.5" /> caver.cz
+            </a>
           </div>
         </div>
       </footer>
+    </div>
+  )
+}
+
+/** Inline CAVER cluster chart — shows tunnel bottleneck radius
+ *  per cluster as a bar chart. */
+function CaverClusterChart({ clusters }: {
+  clusters: import('@/lib/caver/types').CaverClusterSummary[]
+}) {
+  const maxBn = Math.max(...clusters.map(c => c.max_bottleneck), 1)
+  return (
+    <div className="h-full overflow-y-auto">
+      <p className="mb-2 text-xs font-medium text-muted-foreground">
+        Cluster bottleneck radii
+      </p>
+      <div className="space-y-2">
+        {clusters.map(c => {
+          const color = CAVER_CLUSTER_COLORS[(c.id - 1) % CAVER_CLUSTER_COLORS.length]
+          return (
+            <div key={c.id} className="space-y-0.5">
+              <div className="flex items-center justify-between text-[10px]">
+                <span className="flex items-center gap-1.5 font-medium">
+                  <span className="size-2.5 rounded-sm" style={{ background: color }} />
+                  Cluster {c.id}
+                </span>
+                <span className="font-mono text-muted-foreground">
+                  bn={c.avg_bottleneck.toFixed(2)}Å · pri={c.priority.toFixed(2)}
+                </span>
+              </div>
+              {/* Bottleneck bar */}
+              <div className="h-3 rounded bg-muted/40">
+                <div
+                  className="h-full rounded"
+                  style={{
+                    width: `${(c.avg_bottleneck / maxBn) * 100}%`,
+                    background: color,
+                    opacity: 0.7,
+                  }}
+                />
+              </div>
+            </div>
+          )
+        })}
+      </div>
     </div>
   )
 }

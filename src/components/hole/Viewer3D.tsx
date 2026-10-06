@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useRef, useState } from 'react'
-import { HoleViewer, type HoleViewerOptions } from '@/lib/hole/viewer'
+import { HoleViewer, type HoleViewerOptions, type CaverTunnel3D } from '@/lib/hole/viewer'
 import type { HoleSphere, HoleSurface, PoreProfile } from '@/lib/hole/types'
 
 interface Viewer3DProps {
@@ -13,6 +13,10 @@ interface Viewer3DProps {
   /** Pore profile — provides cvec/cpoint so hover-on-chart can highlight the
    *  corresponding 3D position on the centre line. */
   profile?: PoreProfile
+  /** CAVER tunnels to render (when in CAVER mode). */
+  caverTunnels?: CaverTunnel3D[]
+  /** CAVER starting point (for the marker sphere). */
+  caverStartingPoint?: [number, number, number]
   options: HoleViewerOptions
   bgColor: string  // hex like '#0b1220'
   onReady?: (viewer: HoleViewer) => void
@@ -28,7 +32,7 @@ interface Viewer3DProps {
  * changes) are stored in refs and replayed right after initialisation so a
  * slow CDN never silently drops a structure load.
  */
-export function Viewer3D({ pdbText, pdbName, spheres, surface, centreline, profile, options, bgColor, onReady }: Viewer3DProps) {
+export function Viewer3D({ pdbText, pdbName, spheres, surface, centreline, profile, caverTunnels, caverStartingPoint, options, bgColor, onReady }: Viewer3DProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const viewerRef = useRef<HoleViewer | null>(null)
   // Error state is stored together with the pdbText it belongs to, so a new
@@ -41,7 +45,7 @@ export function Viewer3D({ pdbText, pdbName, spheres, surface, centreline, profi
   // Latest inputs — read by the init effect to replay pending state.
   const pdbTextRef = useRef(pdbText)
   const pdbNameRef = useRef(pdbName)
-  const resultsRef = useRef({ spheres, surface, centreline, profile })
+  const resultsRef = useRef({ spheres, surface, centreline, profile, caverTunnels, caverStartingPoint })
   const optionsRef = useRef(options)
   const onReadyRef = useRef(onReady)
 
@@ -50,10 +54,10 @@ export function Viewer3D({ pdbText, pdbName, spheres, surface, centreline, profi
   useEffect(() => {
     pdbTextRef.current = pdbText
     pdbNameRef.current = pdbName
-    resultsRef.current = { spheres, surface, centreline, profile }
+    resultsRef.current = { spheres, surface, centreline, profile, caverTunnels, caverStartingPoint }
     optionsRef.current = options
     onReadyRef.current = onReady
-  }, [pdbText, pdbName, spheres, surface, centreline, profile, options, onReady])
+  }, [pdbText, pdbName, spheres, surface, centreline, profile, caverTunnels, caverStartingPoint, options, onReady])
 
   // mount once
   useEffect(() => {
@@ -90,7 +94,9 @@ export function Viewer3D({ pdbText, pdbName, spheres, surface, centreline, profi
             v.loadStructure(pdbTextRef.current, pdbNameRef.current)
           }
           const r = resultsRef.current
-          if (r.spheres.length || r.surface.triangles.length || r.centreline.length) {
+          if (r.caverTunnels && r.caverTunnels.length > 0 && r.caverStartingPoint) {
+            v.loadCaverTunnels(r.caverTunnels, r.caverStartingPoint)
+          } else if (r.spheres.length || r.surface.triangles.length || r.centreline.length) {
             v.loadHoleResults(r.spheres, r.surface, r.centreline, r.profile?.cvec ?? null, r.profile?.cpoint ?? null)
           }
           v.setOptions(optionsRef.current)
@@ -143,11 +149,19 @@ export function Viewer3D({ pdbText, pdbName, spheres, surface, centreline, profi
     const v = viewerRef.current
     if (!v) return
     try {
-      v.loadHoleResults(spheres, surface, centreline, profile?.cvec ?? null, profile?.cpoint ?? null)
+      if (caverTunnels && caverTunnels.length > 0 && caverStartingPoint) {
+        v.loadCaverTunnels(caverTunnels, caverStartingPoint)
+      } else {
+        // No CAVER tunnels — load HOLE results (if any) and clear CAVER group
+        v.clearCaverResults?.()
+        if (spheres.length || surface.triangles.length || centreline.length) {
+          v.loadHoleResults(spheres, surface, centreline, profile?.cvec ?? null, profile?.cpoint ?? null)
+        }
+      }
     } catch (e) {
       console.error('loadHoleResults error:', e)
     }
-  }, [spheres, surface, centreline, profile, viewerReady])
+  }, [spheres, surface, centreline, profile, caverTunnels, caverStartingPoint, viewerReady])
 
   // option changes
   useEffect(() => {

@@ -425,3 +425,56 @@ Stage Summary:
 - Profile hover→3D highlight uses cvec projection for accurate t→3D position mapping
 - Compare button now always visible with clear disabled-state guidance
 - Build successful, no lint errors, server running on port 3000
+
+---
+Task ID: 3
+Agent: main
+Task: Integrate CAVER algorithm into the project (caver-pymol-plugin-master.zip)
+
+Work Log:
+- Extracted and studied the CAVER PyMOL plugin source (Caver3/__init__.py, config.txt, caver.jar)
+- Identified architecture: caver.jar is the Java algorithm core; the Python plugin is a UI wrapper
+- Set up vendor/caver/ directory with caver.jar + lib/*.jar (AverageLinkClustering, kd, ml, vecmath) + config_default.txt + atom_radii.csv + citation.txt
+- Verified Java 21 (JRE only, no JDK) is available — caver.jar runs successfully
+- Ran caver.jar on gramicidin test PDB → output is a Java-serialized Tunnels object (binary .obj format)
+- Wrote a TypeScript Java Serialization Protocol (JSP) parser (parse-tunnels.ts) since no JDK/javac is available:
+  - Handles TC_OBJECT, TC_CLASSDESC, TC_REFERENCE, TC_ARRAY, TC_STRING, TC_BLOCKDATA, TC_NULL, TC_ENDBLOCKDATA
+  - Correctly assigns handles BEFORE field type strings (matching Java's actual handle assignment order)
+  - Only calls skipAnnotation for classes with SC_WRITE_METHOD flag (fixes TVE parsing)
+  - Uses class descriptor name ([D vs [L...) to determine array element type
+  - Handles back-references (TC_REFERENCE) for both objects and class descriptors
+  - CAVER Tunnel fields use trailing underscores (cost_, id_, edges_); TVE fields don't (ax, ay, az)
+- Verified parser: successfully extracted 2 tunnels from gramicidin test, with correct geometry (42 + 26 points, bottleneck 0.909 Å)
+- Implemented caver-runner.ts: writes config.txt, invokes java -jar caver.jar, parses .obj via parse-tunnels.ts, builds cluster summaries
+- Created API routes: POST /api/caver/run (FormData: pdb file + params JSON), GET /api/caver/job/[job_id]/files?path=<relative>
+- Created CaverRunForm component: starting point (x,y,z) with "Pick in 3D" button, probe radius, shell radius/depth, approximating balls dropdown, clustering threshold, advanced options
+- Created CaverResultsPanel: summary metrics (tunnels, clusters, bottleneck), cluster summary table, tunnel details, output file downloads
+- Extended HoleViewer (viewer.ts) with CAVER tunnel rendering:
+  - New tunnelsGroup + showTunnels option
+  - loadCaverTunnels(): each tunnel as a colored tube + instanced spheres + bottleneck wireframe sphere + starting point magenta marker
+  - clearCaverResults() method for mode switching
+  - Updated fitView, raycastFromMouse, dispose to include tunnelsGroup
+- Updated Viewer3D.tsx to pass caverTunnels + caverStartingPoint to the viewer, with mode-aware effect
+- Updated ViewerControls to show CAVER-specific toggles in CAVER mode (tunnels toggle) vs HOLE-specific toggles in HOLE mode
+- Updated page.tsx with:
+  - Mode switcher (HOLE2 · Pore profile / CAVER · Access tunnels) in the hero section
+  - Conditional rendering of RunForm vs CaverRunForm
+  - Conditional rendering of ResultsPanel vs CaverResultsPanel
+  - Conditional rendering of ProfileChart vs CaverClusterChart (bottleneck bar chart)
+  - CAVER loading overlay
+  - Mode-aware Viewer3D props (empty HOLE data in CAVER mode, empty CAVER data in HOLE mode)
+  - Starting point picker: click on 3D viewer sets x,y,z via raycastFromMouse
+- Agent Browser verification:
+  - HOLE mode: loads structure, runs HOLE2, shows surface + centre line, profile chart works ✅
+  - CAVER mode: loads structure, sets starting point, runs caver.jar, shows 2 tunnels as colored tubes + spheres + bottleneck markers + magenta start marker ✅
+  - Results panel: 2 tunnels, 2 clusters, bottleneck 0.909 Å, cluster summary table, tunnel details, output file downloads ✅
+  - Cluster bottleneck bar chart renders below the 3D viewer ✅
+  - Mode switching properly clears the other mode's 3D content ✅
+
+Stage Summary:
+- CAVER 3.0.3 algorithm fully integrated — original Java caver.jar runs unchanged
+- Binary Java-serialized output parsed by custom TypeScript JSP reader (no JDK needed)
+- Both HOLE2 and CAVER modes coexist with a clean mode switcher
+- 3D viewer renders tunnels as colored tubes + spheres per cluster
+- All output files available for download (log.txt, tunnel profiles, cluster CSVs, etc.)
+- Build successful, no lint errors, server running on port 3000

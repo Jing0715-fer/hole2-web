@@ -73,8 +73,25 @@ export interface HoleViewerOptions {
   showCentreLine: boolean
   /** Show side-chain sticks for residues lining the pore (within cutoff Å of the centre line). */
   showPoreSideChains: boolean
+  /** Show CAVER tunnels (each cluster as a coloured tube + sphere chain). */
+  showTunnels: boolean
   surfaceOpacity: number
   sphereScale: number
+}
+
+/** A CAVER tunnel point — used by loadCaverTunnels.
+ *  Matches the CaverTunnelPoint shape from src/lib/caver/types.ts. */
+export interface CaverTunnelPoint3D {
+  x: number; y: number; z: number; r: number
+}
+
+/** A CAVER tunnel for 3D rendering. */
+export interface CaverTunnel3D {
+  id: number
+  cluster_id: number
+  length: number
+  bottleneck_radius: number
+  points: CaverTunnelPoint3D[]
 }
 
 export class HoleViewer {
@@ -96,13 +113,18 @@ export class HoleViewer {
   private surfaceGroup = new THREE.Group()
   private centreLineGroup = new THREE.Group()
   private sphereGroup = new THREE.Group()
+  /** CAVER access tunnels — each cluster rendered as a coloured tube + sphere chain. */
+  private tunnelsGroup = new THREE.Group()
+  /** CAVER starting-point marker (sphere at the active-site origin). */
+  private caverStartMarker: THREE.Mesh | null = null
   private options: HoleViewerOptions = {
     showCartoon: true,
-    showBallStick: false,   // off by default — cartoon is the main representation
+    showBallStick: false,
     showSurface: true,
     showSpheres: false,
     showCentreLine: true,
-    showPoreSideChains: true,  // highlight the pore-lining residues
+    showPoreSideChains: true,
+    showTunnels: true,
     surfaceOpacity: 1.0,
     sphereScale: 1.0,
   }
@@ -189,6 +211,7 @@ export class HoleViewer {
     this.scene.add(this.surfaceGroup)
     this.scene.add(this.centreLineGroup)
     this.scene.add(this.sphereGroup)
+    this.scene.add(this.tunnelsGroup)
 
     // resize handling
     this.resizeObserver = new ResizeObserver(() => this.handleResize())
@@ -244,11 +267,12 @@ export class HoleViewer {
     this.clearGroup(this.cartoonGroup)
     this.clearGroup(this.ballStickGroup)
     this.clearGroup(this.poreSideChainsGroup)
-    // ALSO clear old HOLE results (surface, centre line, spheres) so the
-    // previous run's pore doesn't linger when a new structure is loaded.
+    // ALSO clear old HOLE results (surface, centre line, spheres) AND CAVER
+    // tunnels so previous analyses don't linger when a new structure loads.
     this.clearGroup(this.surfaceGroup)
     this.clearGroup(this.centreLineGroup)
     this.clearGroup(this.sphereGroup)
+    this.clearGroup(this.tunnelsGroup)
     this.currentCentreline = []
     this.currentCvec = null
     this.currentCpoint = null
@@ -349,6 +373,102 @@ export class HoleViewer {
 
     this.updateVisibility()
     requestAnimationFrame(() => this.fitView())
+  }
+
+  /** Load CAVER tunnels — each cluster rendered as a coloured tube + sphere chain
+   *  from the starting point to the protein surface.  Also adds a star-shaped
+   *  marker at the starting point. */
+  loadCaverTunnels(tunnels: CaverTunnel3D[], startingPoint: [number, number, number]) {
+    this.clearGroup(this.tunnelsGroup)
+    // Also clear HOLE-specific groups (surface, centre line, spheres) so the
+    // two analysis modes don't overlap visually.
+    this.clearGroup(this.surfaceGroup)
+    this.clearGroup(this.centreLineGroup)
+    this.clearGroup(this.sphereGroup)
+    this.clearGroup(this.poreSideChainsGroup)
+
+    // Starting-point marker — a bright magenta sphere with a halo
+    const spGeo = new THREE.SphereGeometry(1.2, 20, 14)
+    const spMat = new THREE.MeshBasicMaterial({ color: 0xff00ff, transparent: true, opacity: 0.9 })
+    const spMesh = new THREE.Mesh(spGeo, spMat)
+    spMesh.position.set(...startingPoint)
+    this.tunnelsGroup.add(spMesh)
+    this.disposables.push(spGeo, spMat)
+    // Halo ring
+    const ringGeo = new THREE.TorusGeometry(2.5, 0.15, 8, 32)
+    const ringMat = new THREE.MeshBasicMaterial({ color: 0xff00ff, transparent: true, opacity: 0.5 })
+    const ring = new THREE.Mesh(ringGeo, ringMat)
+    ring.position.set(...startingPoint)
+    this.tunnelsGroup.add(ring)
+    this.disposables.push(ringGeo, ringMat)
+
+    // Render each tunnel as a tube through its points, coloured by cluster
+    for (const tunnel of tunnels) {
+      if (tunnel.points.length < 2) continue
+      const clusterIdx = (tunnel.cluster_id - 1) % CHAIN_COLORS.length
+      const color = CHAIN_COLORS[clusterIdx]
+
+      // Build a smooth curve through the tunnel points
+      const pts = tunnel.points.map(p => new THREE.Vector3(p.x, p.y, p.z))
+      const curve = new THREE.CatmullRomCurve3(pts, false, 'catmullrom', 0.5)
+      const tubularSeg = Math.max(16, pts.length * 4)
+      const tubeGeo = new THREE.TubeGeometry(curve, tubularSeg, 0.25, 8, false)
+      const tubeMat = new THREE.MeshStandardMaterial({
+        color, roughness: 0.3, metalness: 0.2,
+        emissive: color, emissiveIntensity: 0.15,
+      })
+      const tubeMesh = new THREE.Mesh(tubeGeo, tubeMat)
+      this.tunnelsGroup.add(tubeMesh)
+      this.disposables.push(tubeGeo, tubeMat)
+
+      // Add spheres at each sample point, scaled by the local radius.
+      // The bottleneck (min radius) shows as a brighter sphere.
+      const sphereGeo = new THREE.SphereGeometry(1, 12, 8)
+      const sphereMat = new THREE.MeshStandardMaterial({
+        color, roughness: 0.4, metalness: 0.1,
+        transparent: true, opacity: 0.7,
+      })
+      const inst = new THREE.InstancedMesh(sphereGeo, sphereMat, tunnel.points.length)
+      const m = new THREE.Matrix4()
+      for (let k = 0; k < tunnel.points.length; k++) {
+        const p = tunnel.points[k]
+        const r = Math.max(0.15, Math.min(p.r, 2.0)) // clamp for visual clarity
+        m.makeScale(r, r, r)
+        m.setPosition(p.x, p.y, p.z)
+        inst.setMatrixAt(k, m)
+      }
+      inst.instanceMatrix.needsUpdate = true
+      this.tunnelsGroup.add(inst)
+      this.disposables.push(sphereGeo, sphereMat)
+
+      // Bottleneck marker — a small wireframe sphere at the min-radius point
+      if (tunnel.bottleneck_radius > 0) {
+        let minR = Infinity
+        let bnPos: THREE.Vector3 | null = null
+        for (const p of tunnel.points) {
+          if (p.r < minR) { minR = p.r; bnPos = new THREE.Vector3(p.x, p.y, p.z) }
+        }
+        if (bnPos) {
+          const bnGeo = new THREE.SphereGeometry(Math.max(0.3, minR), 16, 12)
+          const bnMat = new THREE.MeshBasicMaterial({
+            color: 0xffffff, wireframe: true, transparent: true, opacity: 0.6,
+          })
+          const bnMesh = new THREE.Mesh(bnGeo, bnMat)
+          bnMesh.position.copy(bnPos)
+          this.tunnelsGroup.add(bnMesh)
+          this.disposables.push(bnGeo, bnMat)
+        }
+      }
+    }
+
+    this.updateVisibility()
+    requestAnimationFrame(() => this.fitView())
+  }
+
+  /** Clear CAVER tunnel results (when switching back to HOLE mode or loading
+   *  a new structure). */
+  clearCaverResults() {
+    this.clearGroup(this.tunnelsGroup)
   }
 
   private buildCartoon(s: PdbStructure, chainColorMap: Map<string, number>) {
@@ -829,13 +949,13 @@ export class HoleViewer {
   }
 
   private updateVisibility() {
-    // Each representation lives in its own group so toggles are independent.
     this.cartoonGroup.visible = this.options.showCartoon
     this.ballStickGroup.visible = this.options.showBallStick
     this.poreSideChainsGroup.visible = this.options.showPoreSideChains
     this.surfaceGroup.visible = this.options.showSurface
     this.centreLineGroup.visible = this.options.showCentreLine
     this.sphereGroup.visible = this.options.showSpheres
+    this.tunnelsGroup.visible = this.options.showTunnels
   }
 
   /** Frame the scene to the combined bounding box of structure + surface. */
@@ -844,7 +964,7 @@ export class HoleViewer {
     this.handleResize()
     this.bbox.makeEmpty()
     let meshCount = 0
-    for (const g of [this.cartoonGroup, this.ballStickGroup, this.poreSideChainsGroup, this.surfaceGroup, this.centreLineGroup, this.sphereGroup]) {
+    for (const g of [this.cartoonGroup, this.ballStickGroup, this.poreSideChainsGroup, this.surfaceGroup, this.centreLineGroup, this.sphereGroup, this.tunnelsGroup]) {
       if (!g.visible) continue
       g.updateMatrixWorld(true)
       g.traverse(obj => {
@@ -1076,7 +1196,7 @@ export class HoleViewer {
     raycaster.setFromCamera(ndc, this.camera)
 
     const meshes: THREE.Object3D[] = []
-    for (const g of [this.cartoonGroup, this.ballStickGroup, this.poreSideChainsGroup, this.surfaceGroup, this.centreLineGroup, this.sphereGroup]) {
+    for (const g of [this.cartoonGroup, this.ballStickGroup, this.poreSideChainsGroup, this.surfaceGroup, this.centreLineGroup, this.sphereGroup, this.tunnelsGroup]) {
       if (!g.visible) continue
       g.traverse(obj => {
         if (obj instanceof THREE.Mesh) meshes.push(obj)
@@ -1193,6 +1313,7 @@ export class HoleViewer {
     this.clearGroup(this.surfaceGroup)
     this.clearGroup(this.centreLineGroup)
     this.clearGroup(this.sphereGroup)
+    this.clearGroup(this.tunnelsGroup)
     for (const d of this.disposables) {
       try { d.dispose() } catch { /* noop */ }
     }
