@@ -1,17 +1,14 @@
 'use client'
 
-import { useMemo, type ReactNode } from 'react'
-import { Download, FileText, Box, TrendingDown, Ruler, Activity, Zap, Loader2, AlertCircle, Package } from 'lucide-react'
-import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
+import { useEffect, useMemo, useState } from 'react'
+import { Download, FileText, Package, AlertCircle, OctagonAlert } from 'lucide-react'
 import { Button } from '@/components/ui/button'
-import { Badge } from '@/components/ui/badge'
-import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
+import { SectionLabel } from '@/components/hole/SectionLabel'
 import type { RunResult } from '@/lib/hole/types'
-import { downloadUrl, downloadZipUrl, describeFile, type JobFile } from '@/lib/hole/api'
+import { downloadUrl, downloadZipUrl, describeFile, fetchJobFiles, type JobFile } from '@/lib/hole/api'
 
 /** Best-effort file-size estimate from the result payload (avoids an extra
- *  round-trip to /api/job/{id}/files just to show sizes).  The exact size is
- *  shown on the download link itself. */
+ *  round-trip to /api/job/{id}/files just to show sizes). */
 function guessFileSize(result: RunResult, name: string): number {
   const len = (arr: unknown) => (Array.isArray(arr) ? arr.length : 0)
   switch (name) {
@@ -25,35 +22,33 @@ function guessFileSize(result: RunResult, name: string): number {
   }
 }
 
+function Row({ label, value, accent }: { label: string; value: string; accent?: boolean }) {
+  return (
+    <div className="flex items-baseline justify-between gap-3 px-3 py-[7px]">
+      <span className="protocol-label">{label}</span>
+      <span
+        className={
+          'font-mono text-[11px] font-medium tnum ' +
+          (accent ? 'text-vermilion' : 'text-foreground')
+        }
+      >
+        {value}
+      </span>
+    </div>
+  )
+}
+
 interface ResultsPanelProps {
   result: RunResult | null
   loading: boolean
   error: string | null
 }
 
-function StatCard({ icon, label, value, unit, color }: {
-  icon: ReactNode; label: string; value: string; unit?: string; color?: string
-}) {
-  return (
-    <div className="flex items-center gap-3 rounded-lg border border-border/50 bg-muted/20 px-3 py-2.5">
-      <div className="flex size-9 shrink-0 items-center justify-center rounded-md bg-background"
-        style={{ color: color ?? 'currentColor' }}>
-        {icon}
-      </div>
-      <div className="min-w-0">
-        <p className="text-[10px] uppercase tracking-wide text-muted-foreground">{label}</p>
-        <p className="truncate font-mono text-sm font-semibold">
-          {value}{unit && <span className="ml-1 text-xs text-muted-foreground">{unit}</span>}
-        </p>
-      </div>
-    </div>
-  )
-}
-
 export function ResultsPanel({ result, loading, error }: ResultsPanelProps) {
-  // Use the files list returned in the result payload directly — it always
-  // matches the job, no need to re-fetch.
-  const files: JobFile[] = useMemo(() => {
+  // Estimated sizes render immediately; real sizes arrive from the job
+  // endpoint right after (they include the multi-MB input PDB, which no
+  // client-side estimate can know).
+  const estimated: JobFile[] = useMemo(() => {
     if (!result) return []
     return result.files.map((name) => {
       const size = guessFileSize(result, name)
@@ -61,186 +56,203 @@ export function ResultsPanel({ result, loading, error }: ResultsPanelProps) {
     })
   }, [result])
 
+  // Real sizes arrive from the job endpoint right after a run (they include
+  // the multi-MB input PDB, which no client-side estimate can know). Keyed by
+  // job id so a new result naturally falls back to the estimates below.
+  const [fetched, setFetched] = useState<{ jobId: string; files: JobFile[] } | null>(null)
+  useEffect(() => {
+    if (!result) return
+    let cancelled = false
+    fetchJobFiles(result.job_id)
+      .then((files) => { if (!cancelled) setFetched({ jobId: result.job_id, files }) })
+      .catch(() => { /* keep the estimates */ })
+    return () => { cancelled = true }
+  }, [result])
+
+  const files: JobFile[] =
+    result && fetched?.jobId === result.job_id ? fetched.files : estimated
+
   if (loading) {
     return (
-      <Card className="border-border/60">
-        <CardContent className="flex h-64 flex-col items-center justify-center gap-3 text-center">
-          <Loader2 className="size-8 animate-spin text-emerald-500" />
-          <div>
-            <p className="text-sm font-medium">Running HOLE2…</p>
-            <p className="text-xs text-muted-foreground">Parsing structure → sampling pore → triangulating surface</p>
+      <section className="space-y-3">
+        <SectionLabel>Readout</SectionLabel>
+        <div className="border bg-card px-4 py-6">
+          <div className="flex flex-col items-center gap-3 text-center">
+            <p className="font-mono text-[11px] uppercase tracking-[0.22em] text-foreground">
+              tracing<span className="anim-dots">…</span>
+            </p>
+            <ol className="space-y-1 font-mono text-[9px] uppercase tracking-[0.14em] text-muted-foreground">
+              <li>01 · monte-carlo pore search</li>
+              <li>02 · sphere optimisation</li>
+              <li>03 · surface triangulation</li>
+            </ol>
           </div>
-        </CardContent>
-      </Card>
+        </div>
+      </section>
     )
   }
 
   if (error) {
     return (
-      <Alert variant="destructive">
-        <AlertCircle className="size-4" />
-        <AlertTitle>HOLE2 run failed</AlertTitle>
-        <AlertDescription className="mt-1 break-words font-mono text-xs">{error}</AlertDescription>
-      </Alert>
+      <section className="space-y-3">
+        <SectionLabel>Readout</SectionLabel>
+        <div className="border-l-2 border-vermilion bg-vermilion/[0.05] px-3.5 py-3">
+          <p className="flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-[0.14em] text-vermilion">
+            <OctagonAlert className="size-3.5" /> run failed
+          </p>
+          <p className="mt-1.5 break-words font-mono text-[11px] leading-relaxed text-foreground/80">
+            {error}
+          </p>
+        </div>
+      </section>
     )
   }
 
   if (!result) {
     return (
-      <Card className="border-dashed border-border/60">
-        <CardContent className="flex h-64 flex-col items-center justify-center gap-2 text-center text-muted-foreground">
-          <Box className="size-8 opacity-40" />
-          <p className="text-sm">No results yet</p>
-          <p className="text-xs">Upload a PDB file and click “Run HOLE2 analysis”.</p>
-        </CardContent>
-      </Card>
+      <section className="space-y-3">
+        <SectionLabel>Readout</SectionLabel>
+        <div className="border border-dashed px-4 py-6">
+          <p className="text-center font-mono text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
+            no measurement yet
+          </p>
+          <p className="mt-1 text-center font-mono text-[9px] uppercase tracking-[0.12em] text-muted-foreground/60">
+            run HOLE2 to populate the readout
+          </p>
+        </div>
+      </section>
     )
   }
 
   const s = result.summary
   const fmt = (n: number | null | undefined, d = 3) => n == null ? '—' : n.toFixed(d)
+  const isNoPore = s.status === 'no_pore' || s.status === 'error'
 
   return (
-    <div className="space-y-4">
-      {/* Non-fatal warnings (e.g. sos_triangle polygon overflow on large pores) */}
-      {result.warnings && result.warnings.length > 0 && (
-        <Alert>
-          <AlertCircle className="size-4" />
-          <AlertTitle className="text-xs">Notice</AlertTitle>
-          <AlertDescription className="mt-1 space-y-1 text-xs">
-            {result.warnings.map((w, i) => (
-              <p key={i}>{w}</p>
-            ))}
-          </AlertDescription>
-        </Alert>
-      )}
+    <section className="space-y-4">
+      <SectionLabel
+        right={
+          <span className="shrink-0 font-mono text-[9px] uppercase tracking-wider text-muted-foreground/70">
+            job {result.job_id}
+          </span>
+        }
+      >
+        Readout
+      </SectionLabel>
 
-      {/* Summary stats */}
-      <Card className="border-border/60">
-        <CardHeader className="pb-3">
-          <CardTitle className="flex items-center justify-between text-base">
-            <span className="flex items-center gap-2">
-              <Activity className="size-4 text-emerald-500" />
-              Pore-profile summary
-            </span>
-            <Badge variant="secondary" className="font-mono text-[10px]">job {result.job_id}</Badge>
-          </CardTitle>
-          <CardDescription className="text-xs">
-            {s.n_spheres} spheres sampled · {s.n_samples} profile points · {s.n_triangles} surface triangles
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="grid grid-cols-2 gap-2.5 sm:grid-cols-3">
-          <StatCard
-            icon={<TrendingDown className="size-4" />}
-            label="Min radius"
-            value={fmt(s.min_radius, 3)}
-            unit="Å"
-            color="#dc2626"
-          />
-          <StatCard
-            icon={<Ruler className="size-4" />}
-            label="Pore length"
-            value={fmt(s.pore_length, 2)}
-            unit="Å"
-            color="#2563eb"
-          />
-          <StatCard
-            icon={<Box className="size-4" />}
-            label="Max radius"
-            value={fmt(s.max_radius, 3)}
-            unit="Å"
-            color="#16a34a"
-          />
-          <StatCard
-            icon={<Zap className="size-4" />}
-            label="G factor F"
-            value={fmt(s.g_factor, 3)}
-            unit="Å⁻¹"
-            color="#f59e0b"
-          />
-          <StatCard
-            icon={<Zap className="size-4" />}
-            label="G_macro"
-            value={fmt(s.g_macro, 1)}
-            unit="pS"
-            color="#f59e0b"
-          />
-          <StatCard
-            icon={<FileText className="size-4" />}
-            label="Constriction t"
-            value={fmt(s.min_t, 2)}
-            unit="Å"
-            color="#fbbf24"
-          />
-        </CardContent>
-      </Card>
-
-      {/* Output files */}
-      <Card className="border-border/60">
-        <CardHeader className="pb-3">
-          <CardTitle className="flex items-center justify-between text-base">
-            <span className="flex items-center gap-2">
-              <Download className="size-4 text-emerald-500" />
-              Output files
-            </span>
-            {files.length > 0 && (
-              <a
-                href={downloadZipUrl(result.job_id)}
-                download={`hole2-${result.job_id}.zip`}
-                className="inline-flex items-center gap-1.5 rounded-md bg-emerald-600 px-2.5 py-1 text-[11px] font-medium text-white transition-colors hover:bg-emerald-700"
-              >
-                <Package className="size-3" />
-                Download all (.zip)
-              </a>
-            )}
-          </CardTitle>
-          <CardDescription className="text-xs">
-            Identical to the original HOLE2 command-line output. Click a file to download.
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          <div className="max-h-64 space-y-1.5 overflow-y-auto pr-1">
-            {files.map((f) => (
-              <a
-                key={f.name}
-                href={downloadUrl(result.job_id, f.name)}
-                download={f.name}
-                className="flex items-center justify-between gap-3 rounded-md border border-border/40 bg-muted/20 px-3 py-2 transition-colors hover:border-emerald-500/40 hover:bg-emerald-500/5"
-              >
-                <div className="flex min-w-0 items-center gap-2">
-                  <FileText className="size-4 shrink-0 text-muted-foreground" />
-                  <div className="min-w-0">
-                    <p className="truncate font-mono text-xs font-medium">{f.name}</p>
-                    <p className="truncate text-[10px] text-muted-foreground">{describeFile(f.name)}</p>
-                  </div>
-                </div>
-                <div className="flex shrink-0 items-center gap-2">
-                  <Badge variant="outline" className="text-[10px]">{(f.size / 1024).toFixed(1)} KB</Badge>
-                  <Download className="size-3.5 text-muted-foreground" />
-                </div>
-              </a>
+      {/* No-pore guidance — HOLE completed but traced nothing */}
+      {isNoPore && (
+        <div className="border-l-2 border-vermilion bg-vermilion/[0.05] px-3.5 py-3">
+          <p className="font-mono text-[10px] uppercase tracking-[0.14em] text-vermilion">
+            no pore traced
+          </p>
+          <div className="mt-2 space-y-1.5">
+            {(result.warnings?.length ? result.warnings : ['HOLE completed but could not trace a pore with the current parameters.']).map((w, i) => (
+              <p key={i} className="text-[11px] leading-relaxed text-foreground/75">
+                {w}
+              </p>
             ))}
           </div>
-        </CardContent>
-      </Card>
+          {s.cguess_direction && (
+            <p className="mt-2 font-mono text-[10px] text-muted-foreground">
+              auto-guessed direction: <b className="text-foreground">{s.cguess_direction}</b>
+            </p>
+          )}
+        </div>
+      )}
+
+      {/* Non-fatal warnings (e.g. sos_triangle polygon overflow on large pores) */}
+      {!isNoPore && result.warnings && result.warnings.length > 0 && (
+        <div className="border-l-2 border-ochre bg-muted/50 px-3.5 py-2.5">
+          <p className="flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-[0.14em] text-muted-foreground">
+            <AlertCircle className="size-3.5" /> notice
+          </p>
+          <div className="mt-1 space-y-1">
+            {result.warnings.map((w, i) => (
+              <p key={i} className="text-[11px] leading-relaxed text-foreground/75">{w}</p>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Headline — minimum radius (hidden for failed traces; the guidance above stands alone) */}
+      {!isNoPore && (
+      <div className="border bg-card">
+        <div className="flex items-baseline justify-between px-3 pb-0.5 pt-2.5">
+          <span className="protocol-label">minimum radius</span>
+          {s.min_t != null && (
+            <span className="font-mono text-[9px] uppercase tracking-wider text-muted-foreground tnum">
+              at t = {s.min_t.toFixed(2)} å
+            </span>
+          )}
+        </div>
+        <p className="px-3 pb-2.5 pt-0.5 font-mono text-[30px] leading-none font-medium tracking-tight text-vermilion tnum">
+          {s.min_radius != null ? s.min_radius.toFixed(3) : '—'}
+          <span className="ml-1.5 align-baseline font-mono text-[13px] font-normal text-muted-foreground">Å</span>
+        </p>
+        <div className="border-t px-3 py-2">
+          <p className="text-[10px] leading-relaxed text-muted-foreground">
+            {s.n_spheres ?? 0} spheres sampled · {s.n_samples ?? 0} profile points ·{' '}
+            {s.n_triangles ?? 0} triangles
+          </p>
+        </div>
+      </div>
+      )}
+
+      {/* Secondary measurements */}
+      {!isNoPore && (
+      <div className="divide-y border border-border bg-card">
+        <Row label="pore length" value={`${fmt(s.pore_length, 2)} å`} />
+        <Row label="maximum radius" value={`${fmt(s.max_radius, 3)} å`} />
+        <Row label="conductance F" value={fmt(s.g_factor, 3)} />
+        <Row label="G macro" value={s.g_macro != null ? `${s.g_macro.toFixed(1)} pS` : '—'} />
+      </div>
+      )}
+
+      {/* Output files */}
+      <SectionLabel
+        right={
+          files.length > 0 ? (
+            <a
+              href={downloadZipUrl(result.job_id)}
+              download={`hole2-${result.job_id}.zip`}
+              className="inline-flex shrink-0 items-center gap-1 border bg-card px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-wider text-foreground transition-colors hover:border-foreground"
+            >
+              <Package className="size-3" /> zip
+            </a>
+          ) : undefined
+        }
+      >
+        Output files
+      </SectionLabel>
+      <div className="divide-y border border-border bg-card">
+        {files.map((f) => (
+          <a
+            key={f.name}
+            href={downloadUrl(result.job_id, f.name)}
+            download={f.name}
+            className="group flex items-center justify-between gap-3 px-3 py-2 transition-colors hover:bg-accent"
+          >
+            <div className="flex min-w-0 items-center gap-2">
+              <FileText className="size-3.5 shrink-0 text-muted-foreground/70" />
+              <div className="min-w-0">
+                <p className="truncate font-mono text-[11px] text-foreground">{f.name}</p>
+                <p className="truncate text-[9px] leading-tight text-muted-foreground">{describeFile(f.name)}</p>
+              </div>
+            </div>
+            <div className="flex shrink-0 items-center gap-2">
+              <span className="font-mono text-[9px] text-muted-foreground tnum">{(f.size / 1024).toFixed(1)} KB</span>
+              <Download className="size-3 text-muted-foreground/50 transition-colors group-hover:text-foreground" />
+            </div>
+          </a>
+        ))}
+      </div>
 
       {/* Log tail */}
-      <Card className="border-border/60">
-        <CardHeader className="pb-3">
-          <CardTitle className="flex items-center gap-2 text-base">
-            <FileText className="size-4 text-emerald-500" />
-            HOLE2 log (tail)
-          </CardTitle>
-          <CardDescription className="text-xs">
-            Last 3 KB of the <code>hole_out.txt</code> stream.
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          <pre className="max-h-56 overflow-auto rounded-md border border-border/40 bg-muted/30 p-3 font-mono text-[11px] leading-relaxed text-muted-foreground">
-            {result.log_tail}
-          </pre>
-        </CardContent>
-      </Card>
-    </div>
+      <SectionLabel>Engine log · tail</SectionLabel>
+      <pre className="max-h-44 overflow-auto border bg-foreground/[0.045] p-3 font-mono text-[10px] leading-relaxed text-muted-foreground">
+        {result.log_tail}
+      </pre>
+    </section>
   )
 }

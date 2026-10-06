@@ -922,7 +922,7 @@ const EXAMPLE_PARAMS: Record<string, Record<string, string | boolean>> = {
     endrad: '5.0', ignore_residues: '', shorto: '0', dotden: '20',
   },
   '02_choleratoxin_1chb': {
-    connolly: true, ignore_residues: 'HOH TIP WAT', shorto: '0', dotden: '5',
+    connolly: true, ignore_residues: 'HOH TIP WAT', shorto: '0', dotden: '5', endrad: '15.0',
   },
   '03_maltoporin_1af6': {
     cvect_x: '0.0', cvect_y: '0.0', cvect_z: '1.0',

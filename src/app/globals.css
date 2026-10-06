@@ -8,6 +8,7 @@
   --color-foreground: var(--foreground);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
+  --font-display: var(--font-instrument-serif);
   --color-sidebar-ring: var(--sidebar-ring);
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
@@ -37,79 +38,107 @@
   --color-popover: var(--popover);
   --color-card-foreground: var(--card-foreground);
   --color-card: var(--card);
-  --radius-sm: calc(var(--radius) - 4px);
-  --radius-md: calc(var(--radius) - 2px);
-  --radius-lg: var(--radius);
+  /* Scientific annotation accent — vermilion (ink-on-paper lab convention). */
+  --color-vermilion: var(--vermilion);
+  /* Muted amber for non-fatal notices. */
+  --color-ochre: var(--ochre);
+  /* Instrument-canvas darks. */
+  --color-canvas: var(--canvas);
+  --color-canvas-foreground: var(--canvas-foreground);
+  --radius-sm: calc(var(--radius) - 2px);
+  --radius-md: var(--radius);
+  --radius-lg: calc(var(--radius) + 2px);
   --radius-xl: calc(var(--radius) + 4px);
 }
 
+/*
+ * Design language — "laboratory protocol sheet".
+ *
+ * Warm paper ground, warm ink text, hairline rules instead of drop shadows,
+ * square corners, one restrained accent (vermilion) reserved for annotation:
+ * the constriction point, active states and the primary readout. Typography
+ * does the branding: a serif wordmark, mono data, sentence-case body.
+ */
 :root {
-  --radius: 0.625rem;
-  --background: oklch(1 0 0);
-  --foreground: oklch(0.145 0 0);
-  --card: oklch(1 0 0);
-  --card-foreground: oklch(0.145 0 0);
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.145 0 0);
-  --primary: oklch(0.205 0 0);
-  --primary-foreground: oklch(0.985 0 0);
-  --secondary: oklch(0.97 0 0);
-  --secondary-foreground: oklch(0.205 0 0);
-  --muted: oklch(0.97 0 0);
-  --muted-foreground: oklch(0.556 0 0);
-  --accent: oklch(0.97 0 0);
-  --accent-foreground: oklch(0.205 0 0);
-  --destructive: oklch(0.577 0.245 27.325);
-  --border: oklch(0.922 0 0);
-  --input: oklch(0.922 0 0);
-  --ring: oklch(0.708 0 0);
-  --chart-1: oklch(0.646 0.222 41.116);
-  --chart-2: oklch(0.6 0.118 184.704);
-  --chart-3: oklch(0.398 0.07 227.392);
-  --chart-4: oklch(0.828 0.189 84.429);
-  --chart-5: oklch(0.769 0.188 70.08);
-  --sidebar: oklch(0.985 0 0);
-  --sidebar-foreground: oklch(0.145 0 0);
-  --sidebar-primary: oklch(0.205 0 0);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.97 0 0);
-  --sidebar-accent-foreground: oklch(0.205 0 0);
-  --sidebar-border: oklch(0.922 0 0);
-  --sidebar-ring: oklch(0.708 0 0);
+  --radius: 0.1875rem; /* 3px — near-square */
+
+  --background: oklch(0.962 0.004 95);        /* warm paper */
+  --foreground: oklch(0.235 0.006 80);        /* warm ink  */
+  --card: oklch(0.985 0.002 95);              /* card = slightly brighter paper */
+  --card-foreground: oklch(0.235 0.006 80);
+  --popover: oklch(0.99 0.002 95);
+  --popover-foreground: oklch(0.235 0.006 80);
+  --primary: oklch(0.245 0.007 80);           /* ink — primary actions */
+  --primary-foreground: oklch(0.975 0.002 95);
+  --secondary: oklch(0.94 0.004 95);
+  --secondary-foreground: oklch(0.28 0.006 80);
+  --muted: oklch(0.938 0.004 95);
+  --muted-foreground: oklch(0.50 0.010 85);  /* warm mid grey */
+  --accent: oklch(0.945 0.006 95);            /* hover surfaces */
+  --accent-foreground: oklch(0.28 0.006 80);
+  --destructive: oklch(0.50 0.185 27);
+  --border: oklch(0.895 0.006 95);           /* hairline */
+  --input: oklch(0.87 0.007 95);
+  --ring: oklch(0.30 0.007 80);
+
+  /* Annotation accent — vermilion oxide red. */
+  --vermilion: oklch(0.535 0.155 33);
+
+  /* Notice amber — non-fatal warnings. */
+  --ochre: oklch(0.62 0.105 75);
+
+  /* Instrument canvas — the 3D viewer's deep neutral (slightly warm black). */
+  --canvas: oklch(0.165 0.008 260);
+  --canvas-foreground: oklch(0.92 0.004 95);
+
+  --chart-1: oklch(0.535 0.155 33);           /* vermilion */
+  --chart-2: oklch(0.42 0.10 145);            /* oxide green */
+  --chart-3: oklch(0.50 0.09 255);            /* slate ink */
+  --chart-4: oklch(0.68 0.11 80);             /* ochre */
+  --chart-5: oklch(0.35 0.02 260);            /* graphite */
+
+  --sidebar: oklch(0.985 0.002 95);
+  --sidebar-foreground: oklch(0.235 0.006 80);
+  --sidebar-primary: oklch(0.245 0.007 80);
+  --sidebar-primary-foreground: oklch(0.975 0.002 95);
+  --sidebar-accent: oklch(0.945 0.006 95);
+  --sidebar-accent-foreground: oklch(0.28 0.006 80);
+  --sidebar-border: oklch(0.895 0.006 95);
+  --sidebar-ring: oklch(0.30 0.007 80);
 }
 
 .dark {
-  --background: oklch(0.145 0 0);
-  --foreground: oklch(0.985 0 0);
-  --card: oklch(0.205 0 0);
-  --card-foreground: oklch(0.985 0 0);
-  --popover: oklch(0.205 0 0);
-  --popover-foreground: oklch(0.985 0 0);
-  --primary: oklch(0.922 0 0);
-  --primary-foreground: oklch(0.205 0 0);
-  --secondary: oklch(0.269 0 0);
-  --secondary-foreground: oklch(0.985 0 0);
-  --muted: oklch(0.269 0 0);
-  --muted-foreground: oklch(0.708 0 0);
-  --accent: oklch(0.269 0 0);
-  --accent-foreground: oklch(0.985 0 0);
-  --destructive: oklch(0.704 0.191 22.216);
-  --border: oklch(1 0 0 / 10%);
-  --input: oklch(1 0 0 / 15%);
-  --ring: oklch(0.556 0 0);
-  --chart-1: oklch(0.488 0.243 264.376);
-  --chart-2: oklch(0.696 0.17 162.48);
-  --chart-3: oklch(0.769 0.188 70.08);
-  --chart-4: oklch(0.627 0.265 303.9);
-  --chart-5: oklch(0.645 0.246 16.439);
-  --sidebar: oklch(0.205 0 0);
-  --sidebar-foreground: oklch(0.985 0 0);
-  --sidebar-primary: oklch(0.488 0.243 264.376);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.269 0 0);
-  --sidebar-accent-foreground: oklch(0.985 0 0);
-  --sidebar-border: oklch(1 0 0 / 10%);
-  --sidebar-ring: oklch(0.556 0 0);
+  --background: oklch(0.20 0.005 80);
+  --foreground: oklch(0.93 0.003 95);
+  --card: oklch(0.24 0.005 80);
+  --card-foreground: oklch(0.93 0.003 95);
+  --popover: oklch(0.24 0.005 80);
+  --popover-foreground: oklch(0.93 0.003 95);
+  --primary: oklch(0.93 0.003 95);
+  --primary-foreground: oklch(0.20 0.005 80);
+  --secondary: oklch(0.28 0.005 80);
+  --secondary-foreground: oklch(0.93 0.003 95);
+  --muted: oklch(0.28 0.005 80);
+  --muted-foreground: oklch(0.66 0.006 85);
+  --accent: oklch(0.29 0.005 80);
+  --accent-foreground: oklch(0.93 0.003 95);
+  --destructive: oklch(0.62 0.18 27);
+  --border: oklch(0.32 0.006 80);
+  --input: oklch(0.35 0.006 80);
+  --ring: oklch(0.55 0.006 80);
+  --chart-1: oklch(0.62 0.16 33);
+  --chart-2: oklch(0.60 0.10 145);
+  --chart-3: oklch(0.64 0.09 255);
+  --chart-4: oklch(0.74 0.11 80);
+  --chart-5: oklch(0.50 0.02 260);
+  --sidebar: oklch(0.24 0.005 80);
+  --sidebar-foreground: oklch(0.93 0.003 95);
+  --sidebar-primary: oklch(0.93 0.003 95);
+  --sidebar-primary-foreground: oklch(0.20 0.005 80);
+  --sidebar-accent: oklch(0.29 0.005 80);
+  --sidebar-accent-foreground: oklch(0.93 0.003 95);
+  --sidebar-border: oklch(0.32 0.006 80);
+  --sidebar-ring: oklch(0.55 0.006 80);
 }
 
 @layer base {
@@ -118,5 +147,85 @@
   }
   body {
     @apply bg-background text-foreground;
+    font-feature-settings: "ss01", "cv05";
   }
+  ::selection {
+    background: color-mix(in oklch, var(--vermilion) 22%, transparent);
+  }
+}
+
+@layer utilities {
+  /* Engineering-paper dot grid — the app ground. */
+  .bg-dotgrid {
+    background-image: radial-gradient(
+      color-mix(in oklch, var(--foreground) 9%, transparent) 1px,
+      transparent 1px
+    );
+    background-size: 22px 22px;
+    background-position: -11px -11px;
+  }
+  /* Engineering-paper dot grid for dark canvases. */
+  .bg-dotgrid-dark {
+    background-image: radial-gradient(
+      color-mix(in oklch, var(--canvas-foreground) 10%, transparent) 1px,
+      transparent 1px
+    );
+    background-size: 26px 26px;
+    background-position: -13px -13px;
+  }
+  /* Section label — tiny mono uppercase with a hairline rule. */
+  .protocol-label {
+    font-family: var(--font-geist-mono), ui-monospace, monospace;
+    font-size: 0.625rem;
+    line-height: 1;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--muted-foreground);
+  }
+  /* Tabular numerals for all mono readouts. */
+  .tnum {
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+/* Instrument trace — a thin vermilion line sweeping the canvas while HOLE2 runs. */
+@keyframes scanline {
+  0%   { top: -2px; opacity: 0; }
+  8%   { opacity: 1; }
+  92%  { opacity: 1; }
+  100% { top: 100%; opacity: 0; }
+}
+.scanline {
+  animation: scanline 2.8s linear infinite;
+}
+
+/* Trailing ellipsis for the "tracing…" readout. */
+@keyframes dots {
+  0%   { content: "·"; }
+  33%  { content: "··"; }
+  66%  { content: "···"; }
+}
+.anim-dots::after {
+  content: "·";
+  animation: dots 1.2s steps(1) infinite;
+}
+
+/* Thin, quiet scrollbars — the rails are dense. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in oklch, var(--foreground) 18%, transparent) transparent;
+}
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+*::-webkit-scrollbar-thumb {
+  background: color-mix(in oklch, var(--foreground) 18%, transparent);
+  border-radius: 0;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in oklch, var(--foreground) 30%, transparent);
 }

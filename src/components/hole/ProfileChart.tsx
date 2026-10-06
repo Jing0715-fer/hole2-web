@@ -14,12 +14,12 @@ interface ProfileChartProps {
 }
 
 /**
- * 2D pore-profile chart — plots pore radius vs. channel coordinate,
- * with the HOLE three-zone colour convention (red/green/blue background bands)
- * and a marker at the constriction point (minimum radius).
+ * 2D pore-profile chart — pore radius vs. channel coordinate, drawn like a
+ * journal figure: hairline axes, an ink trace, the HOLE three-zone bands as
+ * faint colour washes and a vermilion marker at the constriction.
  *
- * When the user hovers over the chart, onHover is called with the t value
- * so the 3D viewer can highlight the corresponding pore position.
+ * Hovering the chart calls onHover(t) so the 3D viewer can highlight the
+ * corresponding position along the pore.
  */
 export function ProfileChart({ profile, onHover }: ProfileChartProps) {
   const [hoverT, setHoverT] = useState<number | null>(null)
@@ -36,13 +36,14 @@ export function ProfileChart({ profile, onHover }: ProfileChartProps) {
   const maxR = Math.max(profile.max_radius ?? Math.max(...data.map(d => d.r), 5), HOLE_MAX_GREEN + 1)
   const constrictionT = profile.min_t
 
-  const handleHover = useCallback((activePayload: any) => {
-    if (!activePayload || !activePayload.length || !onHover) {
+  const handleHover = useCallback((activePayload: unknown) => {
+    const payload = activePayload as { payload?: { t?: number } }[] | undefined
+    if (!payload || !payload.length || !onHover) {
       setHoverT(null)
       onHover?.(null)
       return
     }
-    const t = activePayload[0]?.payload?.t
+    const t = payload[0]?.payload?.t
     if (t !== undefined) {
       setHoverT(t)
       onHover(t)
@@ -56,8 +57,8 @@ export function ProfileChart({ profile, onHover }: ProfileChartProps) {
 
   if (data.length < 2) {
     return (
-      <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
-        No profile samples available.
+      <div className="flex h-full items-center justify-center font-mono text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
+        no profile samples
       </div>
     )
   }
@@ -74,18 +75,17 @@ export function ProfileChart({ profile, onHover }: ProfileChartProps) {
   })
 
   return (
-    <div className="h-full w-full"
-      onMouseLeave={handleLeave}
-    >
+    <div className="h-full w-full" onMouseLeave={handleLeave}>
       <ResponsiveContainer width="100%" height="100%">
-        <ComposedChart data={data} margin={{ top: 16, right: 24, bottom: 32, left: 12 }}>
+        <ComposedChart data={data} margin={{ top: 14, right: 16, bottom: 26, left: -4 }}>
           <defs>
             <linearGradient id="profileFill" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stopColor="#3b82f6" stopOpacity={0.18} />
-              <stop offset="100%" stopColor="#3b82f6" stopOpacity={0.02} />
+              <stop offset="0%" stopColor="#1B1A17" stopOpacity={0.07} />
+              <stop offset="100%" stopColor="#1B1A17" stopOpacity={0.01} />
             </linearGradient>
           </defs>
-          <CartesianGrid strokeDasharray="3 3" stroke="currentColor" strokeOpacity={0.1} />
+          {/* horizontal hairlines only — journal figure convention */}
+          <CartesianGrid stroke="currentColor" strokeOpacity={0.07} vertical={false} />
           {bands.map((b, i) => (
             <ReferenceArea
               key={`band-${i}`}
@@ -94,7 +94,7 @@ export function ProfileChart({ profile, onHover }: ProfileChartProps) {
               y1={0}
               y2={maxR}
               fill={b.color}
-              fillOpacity={0.10}
+              fillOpacity={0.07}
               stroke="none"
             />
           ))}
@@ -102,65 +102,69 @@ export function ProfileChart({ profile, onHover }: ProfileChartProps) {
             dataKey="t"
             type="number"
             domain={['dataMin', 'dataMax']}
-            tick={{ fontSize: 11, fill: 'currentColor', fillOpacity: 0.7 }}
+            tick={{ fontSize: 9, fill: 'currentColor', fillOpacity: 0.55, fontFamily: 'var(--font-geist-mono)' }}
             stroke="currentColor"
-            strokeOpacity={0.3}
+            strokeOpacity={0.25}
+            tickLine={false}
             label={{
-              value: 'Channel coordinate t (Å)',
+              value: 'channel coordinate t (å)',
               position: 'insideBottom',
-              offset: -16,
-              style: { fontSize: 12, fill: 'currentColor', fillOpacity: 0.7 },
+              offset: -12,
+              style: { fontSize: 9, fill: 'currentColor', fillOpacity: 0.55, fontFamily: 'var(--font-geist-mono)' },
             }}
           />
           <YAxis
             domain={[0, Math.ceil(maxR * 1.1)]}
-            tick={{ fontSize: 11, fill: 'currentColor', fillOpacity: 0.7 }}
+            tick={{ fontSize: 9, fill: 'currentColor', fillOpacity: 0.55, fontFamily: 'var(--font-geist-mono)' }}
             stroke="currentColor"
-            strokeOpacity={0.3}
+            strokeOpacity={0.25}
+            tickLine={false}
+            width={38}
             label={{
-              value: 'Pore radius R (Å)',
+              value: 'pore radius r (å)',
               angle: -90,
               position: 'insideLeft',
-              offset: 0,
-              style: { fontSize: 12, fill: 'currentColor', fillOpacity: 0.7 },
+              offset: 6,
+              style: { fontSize: 9, fill: 'currentColor', fillOpacity: 0.55, fontFamily: 'var(--font-geist-mono)' },
             }}
           />
           <Tooltip
             contentStyle={{
-              backgroundColor: 'rgba(15, 23, 42, 0.95)',
-              border: '1px solid rgba(148, 163, 184, 0.3)',
-              borderRadius: '8px',
-              color: '#e2e8f0',
-              fontSize: 12,
+              backgroundColor: 'var(--popover)',
+              border: '1px solid var(--border)',
+              borderRadius: 0,
+              color: 'var(--foreground)',
+              fontSize: 11,
+              fontFamily: 'var(--font-geist-mono)',
+              padding: '4px 8px',
             }}
-            formatter={(value: number) => [`${value.toFixed(3)} Å`, 'Pore radius']}
-            labelFormatter={(label: number) => `t = ${label.toFixed(2)} Å`}
+            cursor={{ stroke: 'currentColor', strokeOpacity: 0.25 }}
+            formatter={(value: number) => [`${value.toFixed(3)} å`, 'pore radius']}
+            labelFormatter={(label: number) => `t = ${label.toFixed(2)} å`}
             // Recharts calls this with the active payload on hover
             {...({ onHover: handleHover } as any)}
           />
-          <ReferenceLine y={HOLE_NARROW} stroke={PORE_ZONE_COLORS.narrow} strokeDasharray="4 2"
-            strokeOpacity={0.6}
-            label={{ value: `narrow < ${HOLE_NARROW}`, position: 'right', fontSize: 10, fill: PORE_ZONE_COLORS.narrow, fillOpacity: 0.85 }} />
-          <ReferenceLine y={HOLE_MAX_GREEN} stroke={PORE_ZONE_COLORS.wide} strokeDasharray="4 2"
-            strokeOpacity={0.6}
-            label={{ value: `wide ≥ ${HOLE_MAX_GREEN}`, position: 'right', fontSize: 10, fill: PORE_ZONE_COLORS.wide, fillOpacity: 0.85 }} />
+          {/* zone thresholds — hairline references */}
+          <ReferenceLine y={HOLE_NARROW} stroke="#B5401F" strokeDasharray="3 3" strokeOpacity={0.35}
+            label={{ value: `narrow ${HOLE_NARROW}`, position: 'insideTopLeft', fontSize: 8, fill: '#B5401F', fillOpacity: 0.7, dy: 10 }} />
+          <ReferenceLine y={HOLE_MAX_GREEN} stroke="#1F3A5F" strokeDasharray="3 3" strokeOpacity={0.35}
+            label={{ value: `wide ${HOLE_MAX_GREEN}`, position: 'insideTopLeft', fontSize: 8, fill: '#1F3A5F', fillOpacity: 0.7, dy: 10 }} />
+          {/* constriction — the vermilion annotation */}
           {constrictionT !== null && (
-            <ReferenceLine x={constrictionT} stroke="#fbbf24" strokeDasharray="3 3"
-              strokeOpacity={0.85}
+            <ReferenceLine x={constrictionT} stroke="#B5401F" strokeDasharray="2 2" strokeOpacity={0.9}
               label={{
-                value: `min R = ${minR.toFixed(3)} Å`,
+                value: `r min = ${minR.toFixed(3)} å`,
                 position: 'top',
-                fontSize: 11,
-                fill: '#fbbf24',
-                fillOpacity: 1,
+                fontSize: 9,
+                fill: '#B5401F',
+                fontFamily: 'var(--font-geist-mono)',
               }} />
           )}
-          {/* Hover indicator: vertical line at the hovered t position */}
           {hoverT !== null && (
-            <ReferenceLine x={hoverT} stroke="#ffffff" strokeOpacity={0.5} strokeWidth={1} />
+            <ReferenceLine x={hoverT} stroke="currentColor" strokeOpacity={0.35} strokeWidth={1} />
           )}
           <Area type="monotone" dataKey="r" stroke="none" fill="url(#profileFill)" />
-          <Line type="monotone" dataKey="r" stroke="#3b82f6" strokeWidth={2} dot={false} />
+          <Line type="monotone" dataKey="r" stroke="#1B1A17" strokeWidth={1.5} dot={false} isAnimationActive={false} />
         </ComposedChart>
       </ResponsiveContainer>
     </div>

@@ -36,16 +36,16 @@ export interface NormalizedSample {
 const STORAGE_KEY = 'hole2-run-history'
 const MAX_ENTRIES = 20
 
-// Color palette for multi-run comparison
+// Color palette for multi-run comparison — an ink-on-paper scientific set.
 const COLORS = [
-  '#3b82f6', // blue
-  '#ef4444', // red
-  '#10b981', // emerald
-  '#f59e0b', // amber
-  '#8b5cf6', // violet
-  '#06b6d4', // cyan
-  '#ec4899', // pink
-  '#84cc16', // lime
+  '#B5401F', // vermilion
+  '#2C4E3E', // oxide green
+  '#1F3A5F', // slate ink
+  '#8C6A1F', // ochre
+  '#5B4A73', // plum ink
+  '#3E6E75', // teal ink
+  '#7A3B45', // oxblood
+  '#4A5A2E', // olive
 ]
 
 /** Load all history entries from localStorage. */

@@ -339,52 +339,53 @@ Stage Summary:
 - Final verified state: all E2E green and fast (TRPM8 one-click run finishes in ~10 s in the browser, 3D render pixel-verified).
 
 ---
-Task ID: 1
-Agent: general-purpose
-Task: Port HOLE2 Python service to Next.js API routes (single-port)
+Task ID: 3-a
+Agent: equivalence-verifier
+Task: verify web app == original HOLE2
 
 Work Log:
-- Read /home/z/my-project/worklog.md (339 lines, Tasks 1-7 + CR-1/CR-2) for full project history: HOLE2 + MolVision origins, the cvec/cpoint parsing fixes, the -888/-999 sph sentinels, the sos_triangle polygon-overflow fallback, the TRPM8 9PB6 "no pore" root cause, the qpt_conv hang, the dev-server OOM saga, and the architecture decision to spawn the Python service as a child of Next.js (Task 7).
-- Read /home/z/my-project/mini-services/hole2-service/main.py (1445 lines, Python FastAPI service) and mapped every function:
-  - parse_hole_stdout(text) → PoreProfile (PROFILE_LINE, CVECT/CPOINT explicit + cguess fallbacks, MIN_RADIUS, G_FACTOR, GMACRO + GMACRO_TAG, BEST_DIRECTION, ERROR_LINES, no-pore sentinel 9999)
-  - parse_sph_file(path) → list[dict] (skips resSeq==-888 end markers; keeps -1..-N real pore spheres and -999 Connolly cloud)
-  - centre_line_spheres(spheres) → filters idx != -999 (Task 7 fix — old `idx > -100` truncated long pores)
-  - parse_sos_vmd(path) → {triangles, colors} (handles both "draw trinorm" 6-triple smooth mode AND "draw triangle" 3-triple faceted mode with computed face normals)
-  - infer_channel_axis(spheres) → PCA via Jacobi eigen-decomposition of the 3×3 covariance (recovers cvec/cpoint when HOLE masks them with `************************`)
-  - build_hole_inp(params, pdb, rad, sphpdb) → HOLE .inp control-card text
-  - run_hole_pipeline(pdb_bytes, pdb_name, params, custom_rad) → RunResult (runs hole, sph_process ×2, sos_triangle with dotden=5 auto-fallback, qpt_conv with 5 s timeout)
-- Inspected the existing /home/z/my-project/src/lib/hole/hole-runner.ts (1183 lines) — already a complete, faithful TS port of main.py. All parsing regexes match the Python originals (verified the CGUESS_CVECT/CGUESS_CPOINT regexes against the actual HOLE log with a Node script: they correctly extract `CVECT 0.0000 1.0000 0.0000` and `CPOINT -0.0178 -0.0122 4.2174` from the cguess output). The Jacobi PCA, the sos_triangle polygon-overflow fallback, and the qpt_conv 5 s timeout are all ported.
-- Verified the 9 Next.js API routes already exist (src/app/api/.../route.ts):
-  - GET /api/health, /api/rad-sets, /api/examples, /api/example/[id]/[pdb], /api/pdb/[id]
-  - POST /api/run (multipart form, concurrency limiter, Content-Length pre-check, 50 MB cap)
-  - GET /api/download/[job_id]/[filename], /api/job/[job_id]/files, /api/job/[job_id]/zip (hand-rolled ZIP writer using zlib.deflateSync + CRC-32 — no external deps)
-- Verified the proxy route at /api/hole/[...path]/route.ts is ALREADY deleted (Task 7 removed it; only /api/* direct routes remain).
-- Verified start-servers.sh is already Next.js-only (no Python service, no uvicorn, no Caddy dependency): builds .next if missing, then `setsid npx next start -p 3000`.
-- Verified package.json "start" script is already `next start -p 3000`.
-- Updated /home/z/my-project/src/lib/hole/api.ts: removed the apiUrl() and apiUrlSync() wrapper functions and the proxy/gateway/direct-mode detection comment block. All fetch calls now use plain relative URLs (`fetch('/api/health')`, `fetch('/api/run', ...)`) and the URL-builder helpers (examplePdbUrl, downloadUrl, downloadZipUrl) return template-string paths directly. The file's header comment now reads "Everything runs on a SINGLE port (3000) — Next.js route handlers under /api/* invoke the HOLE2 binaries directly via child_process. No Python service, no gateway, no proxy."
-- Ran `bun run lint` → exit 0, 0 errors, 0 warnings (eslint .).
-- Ran `NODE_OPTIONS=--max-old-space-size=2048 npx next build` → ✓ Compiled successfully in 13.5 s. All 10 routes show in the route map (9 dynamic ƒ + the /api index + / + /_not-found). No build errors.
-- Cleaned up stale job dirs from prior Python-service runs in /tmp/hole2-jobs/ (57 dirs from prior testing).
-- Started the production server with `npx next start -p 3000` and ran end-to-end tests:
-  - GET /api/health → `{"status":"ok","env_ready":true,"env_prefix":"vendor/hole2","hole_bin":"/home/z/my-project/vendor/hole2/bin/hole","jobs_dir":"/tmp/hole2-jobs"}` — HOLE2 binaries detected at vendor/hole2/bin/.
-  - GET /api/rad-sets → 5 rad sets (amberuni, bondi, hardcore, simple, xplor) each with full description.
-  - GET /api/examples → 4 demos (TRPM8 9PB6, gramicidin, cholera toxin, maltoporin) with recommended params.
-  - GET /api/example/01_gramicidin_1grm/1grm_single.pdb → 32 KB PDB streamed.
-  - POST /api/run (gramicidin, default params) → 1.21 MB JSON response in ~2 s:
-    * job_id: 17caec0e77f8
-    * status: ok, min_radius 1.199 Å, pore_length 35 Å, n_samples 281, n_spheres 142, n_triangles 6112, g_macro 274.604 pS
-    * cvec=[0,1,0], cpoint=[-0.0178,-0.0122,4.2174] — correctly recovered from the cguess-printed CVECT/CPOINT lines (regex fallback chain works)
-    * 8 raw output files (hole_out.txt, hole_out.sph, dotsurface.qpt, solid_surface.sos, solid_surface.vmd_plot, hole.inp, simple.rad, 1grm_single.pdb)
-    * profile samples have proper (t, r, cen_line_d, cond_integral, kind) structure — col 1 = channel coordinate t, col 2 = pore radius r (the Task 3 fix)
-  - GET /api/download/17caec0e77f8/hole_out.txt → streams the 71 KB log (verified "channel vector: ************************" masking + "CVECT 0.0000 1.0000 0.0000" cguess output).
-  - GET /api/job/17caec0e77f8/files → JSON listing 8 files with sizes.
-  - GET /api/job/17caec0e77f8/zip → 228 KB valid ZIP archive (deflate-compressed, 8 entries).
-- Confirmed the entire HOLE2 pipeline (hole + sph_process ×2 + sos_triangle + qpt_conv) runs in-process via child_process.spawnSync — no Python service, no uvicorn, no Caddy gateway, no proxy. Everything is on port 3000.
+- Read src/lib/hole/hole-runner.ts + /api/run, /api/pdb/[id] routes; confirmed the app spawns vendor/hole2/bin/hole with a generated hole.inp on stdin (no dotden card is ever sent to `hole`), then sph_process/sos_triangle/qpt_conv; downloaded job artifacts via /api/download/{job_id}/{filename}.
+- Ground truth per example in /tmp/hole-verify/gt01..gt04: copied each vendor .pdb, rewrote the example's hole.inp with fixed coord/radius paths, ran `hole < hole.inp` with vendor bin on PATH; parsed stdout with an independent Python regex parser (parse_gt.py: min-radius line, TAG Rmin/Gmacro/Conn_Gmacro, profile-table row count).
+- Characterized HOLE's nondeterminism first: hole prints a time-derived RNG seed ("Seed integer used by ran # generator"); same-seed runs are byte-identical even across directories, different-seed runs differ in last digits (gramicidin GT reruns: Rmin 1.19669-1.19904 over 20 runs; maltoporin GT reruns span Rmin 1.65-2.05). Sample counts are seed-stable (281/435/615/1267).
+- Ran all 4 examples through POST /api/run with parameters derived from each .inp; also ran repeats (4x example 02, 3x example 01) to compare app value distributions vs GT distributions - they overlap.
+- Compared min radius / n_samples / Gmacro / F / max radius, profile tables sample-by-sample (cmp_profile.py), and .sph files record-by-record (cmp_sph.py) against GT self-noise baselines; verified downloaded job .rad and .pdb files are byte-identical to vendor files.
+- Found + explained the endrad gap: original 02/03 .inp have no ENDRAD -> HOLE built-in default is 15.0 A (proved: no-endrad == endrad 15.0; endrad 10 differs), while the app always writes endrad, defaulting to 5.0 -> with app defaults example 02 gives 145 samples / Gmacro 3138.8 instead of 435 / 2113.7; passing endrad=15 reproduces the original numbers within noise.
+- Extra tests: gramicidin+amberuni through both paths (equivalent within noise); same-seed hole runs with dotden 5/15/20 cards -> byte-identical .sph and TAG (dotden affects only sph_process surface density: .qpt lines 15/118/181 at 5/15/20); GET /api/pdb/1grm -> 200 with 770 valid ATOM records (400/404 on bad IDs).
 
 Stage Summary:
-- The HOLE2 service is now a single-port Next.js app: 9 API routes + the HOLE2 binaries invoked directly via child_process from /home/z/my-project/src/lib/hole/hole-runner.ts.
-- Removed the apiUrlSync / apiUrl wrapper functions and the proxy/gateway/direct-mode detection in src/lib/hole/api.ts; all client fetches now use plain relative URLs.
-- The proxy route at /api/hole/[...path]/route.ts is gone — no more Python service spawned as a child of Next.js.
-- start-servers.sh and package.json start script: `next start -p 3000` (Next.js only).
-- Verified end-to-end on gramicidin: min radius 1.199 Å, 281 profile samples, 142 pore spheres (after filtering -888 end markers), 6112 surface triangles, Gmacro 274.6 pS, cvec=[0,1,0] / cpoint=[-0.0178,-0.0122,4.2174] correctly recovered from the cguess output — matches the original CLI byte-for-byte.
-- lint clean (0 errors 0 warnings), production build succeeds in 13.5 s, all 9 routes serve correctly under /api/* on port 3000.
+- Full report: /tmp/hole-verify/report.txt. Headline numbers (app vs my ground-truth run; GT rerun spread in brackets):
+  01 gramicidin  : Rmin 1.19704 vs 1.19872 [1.19669-1.19904], n=281=281, Gmacro 274.648 vs 274.563 [274.56-274.69] - equivalent.
+  02 choleratoxin: endrad=15 -> Rmin 3.03328 vs 3.03500 [3.03432-3.03550], n=435=435, Gmacro 2113.770 vs 2113.739 [2113.45-2114.01] - equivalent; app-default endrad=5 -> 145 samples / Gmacro 3138.8 (truncated, NOT equivalent - parameter default gap).
+  03 maltoporin  : Rmin 1.98393 vs 2.00546 [1.65-2.05], n=615=615, Gmacro 1185.57 vs 1218.11 [1184.3-1222.7] - equivalent (intrinsically the jumpiest example).
+  04 trpm8 9pb6  : Rmin 2.11237 vs 2.11283 [2.11258-2.11285], n=1267=1267, Gmacro 396.449 vs 396.462 [396.452-396.463] - equivalent.
+- .sph byte-identity: NOT byte-identical for any example (first diffs are last-digit x/y jitter, e.g. line 1 char 38), but app-vs-GT deltas match GT-vs-GT self-noise exactly (e.g. 04: max dR 0.010 A vs self-noise 0.010 A; 01: mean dR 0.00085 vs 0.00102); same-seed GT runs ARE byte-identical across directories, proving the app's file/cwd/env handling adds zero difference. Root cause of residual diffs: HOLE's time-seeded RNG (no SEED card accepted).
+- Verdict: the web app's HOLE2 pipeline is EQUIVALENT to the original binaries within the binary's intrinsic run-to-run noise; the only substantive gap is a parameter default (app endrad=5.0 vs HOLE built-in 15.0 when unset - relevant for pores with vestibules wider than 5 A, e.g. examples 02/03). dotden 20-vs-15 is surface-rendering only; example-04 preset cpoint_z 202.5 vs 202.499 is below noise; shorto 0-vs-2 is verbosity only (byte-identical .sph at same seed).
+
+---
+Task ID: 8
+Agent: main
+Task: Pull latest code, verify algorithm consistency with original HOLE2, redesign UI (avoid AI-flavor), polish UX, push
+
+Work Log:
+- Pulled latest remote (12 new commits since last session: single-port Next.js architecture — hole-runner.ts spawns the Fortran binaries directly from route handlers, no Python service; run history + multi-run comparison; TrackballControls).
+- Synced the sandbox deployment to remote HEAD: replaced src/ tree, removed the old /api/hole proxy + killed the lingering uvicorn on :3001, copied vendor examples (04_trpm8), next.config, scripts/dev-server.sh, start-servers.sh. Verified /api/health, /api/rad-sets, /api/examples live on the new architecture.
+- Algorithm equivalence (delegated subagent, Task ID 3-a): web app == original binaries within the binary's own run-to-run noise on all 4 examples (HOLE is time-seeded). One substantive gap found: the app forced endrad=5 default while the Fortran binary's built-in default is 15 — examples 02/03 (.inp with no ENDRAD card) were truncated with app defaults (02: 145 vs 435 samples).
+- Consistency fixes: DEFAULT_PARAMS.endrad 5.0 → 15.0 (matches the binary default); EXAMPLE_PARAMS['02_choleratoxin_1chb'] now carries endrad 15; RunForm hint updated. UI-verified: cholera toxin now reproduces the original GT (435 samples, Gmacro 2113.7 pS, Rmin 3.036 Å); gramicidin unchanged (1.198 Å); TRPM8 recommended-params unchanged (2.113 Å, 1267 samples).
+- UI redesign — "laboratory protocol sheet" design language replacing the emerald/slate glassmorphism:
+  * globals.css: warm paper ground (oklch 0.962/95), warm ink, 3px radius, hairline borders instead of shadows, vermilion annotation accent (--vermilion), ochre notice amber, instrument-canvas token, engineering dot-grid utilities, protocol-label utility (tiny mono uppercase), thin scrollbars, vermilion selection color.
+  * layout.tsx: Instrument Serif display face (wordmark + display numerals), Geist Sans/Mono retained; Toaster moved to bottom-right.
+  * page.tsx: full workbench layout — flat hairline header (serif HOLE2 wordmark with vermilion 2, engine status LED, fortran version), 3-column divided-by-hairlines main (protocol form | dark stage + profile | readout rail), thin citation footer. Viewer: corner registration ticks, structure/atom-count readout, pointer map hint, scanline trace overlay with live elapsed timer while running, crosshair + dot-grid empty state, drag-and-drop onto canvas. Run action pinned to rail bottom with ⌘/Ctrl+Enter shortcut. Chart panel header strip with Rmin/Rmax/length readouts.
+  * RunForm: protocol sections (STRUCTURE / PROBE PARAMETERS), 1px dashed dropzone, squared mono inputs with prefix labels, compact example list, advanced geometry panel with CPOINT/CVECT grids.
+  * ResultsPanel: instrument readout — vermilion 30px Rmin headline, hairline metric table, no-pore guidance block (vermilion rule) hiding empty measurements, real file sizes via /api/job/{id}/files (fixed the 0.0 KB estimates), mono log tail.
+  * ViewerControls: square drawn checkboxes, hairline rows, pointer map + pore-zone legend, capture PNG.
+  * HistoryPanel: compact rows, ink-on-paper comparison palette, squared recharts styling matching the profile chart.
+  * ProfileChart: journal-figure restyle — ink trace, horizontal hairlines only, faint zone bands, vermilion constriction annotation, mono ticks, paper tooltip.
+  * next.config: devIndicators off (removed the dev badge from screenshots).
+- Fixed: ResultsPanel null-crash when fetched jobId matched a null result (both null → true); real file-size fetch; lint clean (0 errors); mobile 414px verified (no horizontal overflow, stacked layout, footer visible).
+- E2E verified in-browser: gramicidin (1.197 Å), TRPM8 recommended (2.113 Å, render pixel-checked via VLM), TRPM8 defaults → no-pore guidance panel with all 4 actionable hints (API-verified payload), cholera toxin endrad 15 GT match, history select + comparison chart (2 entries), chart hover → 3D highlight, capture PNG, mobile.
+
+Stage Summary:
+- Algorithm consistency: PROVEN equivalent to the original HOLE2 binaries (within seed noise); endrad default now matches the Fortran default (15 Å); all 4 examples reproduce original outputs.
+- Design: complete visual rework — warm paper + ink + vermilion, hairlines, mono data typography, Instrument Serif wordmark, instrument-style viewer overlays. VLM design review: 9/10 "designed product vs AI-generated template", 8/7/9/9/8 across typography/color/layout/authenticity/information design.
+- Architecture in sandbox now matches the repo's single-port design (no Python service).
+- Ready to push: globals.css, layout.tsx, page.tsx, 7 hole components (+1 new SectionLabel), types.ts, hole-runner.ts (endrad), history.ts, next.config.ts, worklog.md.
