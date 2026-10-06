@@ -1,7 +1,7 @@
 'use client'
 
-import { useState, useCallback } from 'react'
-import { Search, Loader2, Upload, Play, RotateCcw, ChevronDown, ChevronRight, MapPin, Crosshair } from 'lucide-react'
+import { useState, useCallback, useEffect } from 'react'
+import { Search, Loader2, Upload, Play, RotateCcw, ChevronDown, ChevronRight, Crosshair } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -9,7 +9,6 @@ import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Textarea } from '@/components/ui/textarea'
 import { Separator } from '@/components/ui/separator'
-import { Badge } from '@/components/ui/badge'
 import type { CaverParams } from '@/lib/caver/types'
 import { DEFAULT_CAVER_PARAMS } from '@/lib/caver/types'
 
@@ -46,29 +45,27 @@ export function CaverRunForm({
     if (f && /\.(pdb|cif|ent)$/i.test(f.name)) onPdbFile(f, f.name)
   }, [onPdbFile])
 
-  // Pick starting point by clicking on the 3D viewer — emits a custom event
-  // that page.tsx listens for and updates the params
+  // Pick starting point by clicking on the 3D viewer — tells page.tsx to
+  // activate the canvas click listener (the parent updates the params).
   const handlePickPoint = useCallback(() => {
     setPickMode(!pickMode)
-    window.dispatchEvent(new CustomEvent('caver-pick-starting-point', {
-      detail: { active: !pickMode },
+    window.dispatchEvent(new CustomEvent('pick-point-start', {
+      detail: { target: 'caver', active: !pickMode },
     }))
   }, [pickMode])
 
-  // Listen for picked coordinates from the 3D viewer
-  useState(() => {
-    if (typeof window !== 'undefined') {
-      window.addEventListener('caver-point-picked', (e: Event) => {
-        const ce = e as CustomEvent
-        if (ce.detail) {
-          set('start_x', ce.detail.x.toFixed(2))
-          set('start_y', ce.detail.y.toFixed(2))
-          set('start_z', ce.detail.z.toFixed(2))
-          setPickMode(false)
-        }
-      })
+  // When a point has been picked (canvas click), reset the button label.
+  // page.tsx handles the actual param update — we only reset our UI state.
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const ce = e as CustomEvent
+      if (ce.detail?.target === 'caver') {
+        setPickMode(false)
+      }
     }
-  })
+    window.addEventListener('pick-point-done', handler)
+    return () => window.removeEventListener('pick-point-done', handler)
+  }, [])
 
   return (
     <Card className="border-border/60">

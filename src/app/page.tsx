@@ -234,46 +234,66 @@ export default function Home() {
     }
   }, [pdbFile, pdbName, caverParams])
 
-  // Listen for "pick starting point" mode from the CaverRunForm
+  // Listen for "pick starting point" requests from either form.
+  // `target` is 'caver' (CAVER start point) or 'hole-cpoint' (HOLE2 CPOINT).
+  const [pickTarget, setPickTarget] = useState<'caver' | 'hole-cpoint' | null>(null)
   useEffect(() => {
     const handler = (e: Event) => {
       const ce = e as CustomEvent
-      setPickMode(ce.detail?.active ?? false)
+      const active = ce.detail?.active ?? false
+      const target = ce.detail?.target as 'caver' | 'hole-cpoint' | undefined
+      if (active && target) {
+        setPickMode(true)
+        setPickTarget(target)
+      } else {
+        setPickMode(false)
+        setPickTarget(null)
+      }
     }
-    window.addEventListener('caver-pick-starting-point', handler)
-    return () => window.removeEventListener('caver-pick-starting-point', handler)
+    window.addEventListener('pick-point-start', handler)
+    return () => window.removeEventListener('pick-point-start', handler)
   }, [])
 
-  // When pick mode is active, clicking on the 3D viewer picks a starting point
-  // We intercept the viewer's middle-click handler via a window event
+  // When pick mode is active, clicking on the 3D viewer picks a point.
+  // The viewer's raycaster finds the closest mesh intersection; we then
+  // update the correct params (CAVER start or HOLE2 cpoint) based on
+  // which form initiated the pick.
   useEffect(() => {
-    if (!pickMode) return
+    if (!pickMode || !pickTarget) return
     const handleViewerClick = (e: MouseEvent) => {
       const viewer = viewerRef.current as any
       if (!viewer) return
-      // Use the viewer's raycaster to find the clicked 3D position
       try {
         const hit = (viewer as any).raycastFromMouse?.(e)
         if (hit?.point) {
           const { x, y, z } = hit.point
-          setCaverParams(prev => ({
-            ...prev,
-            start_x: x.toFixed(2),
-            start_y: y.toFixed(2),
-            start_z: z.toFixed(2),
-          }))
-          window.dispatchEvent(new CustomEvent('caver-point-picked', {
-            detail: { x, y, z },
+          const xs = x.toFixed(2), ys = y.toFixed(2), zs = z.toFixed(2)
+          if (pickTarget === 'caver') {
+            setCaverParams(prev => ({
+              ...prev,
+              start_x: xs, start_y: ys, start_z: zs,
+            }))
+          } else if (pickTarget === 'hole-cpoint') {
+            setParams(prev => ({
+              ...prev,
+              cpoint_x: xs, cpoint_y: ys, cpoint_z: zs,
+            }))
+          }
+          // Notify the form that the pick is done so it can reset its button
+          window.dispatchEvent(new CustomEvent('pick-point-done', {
+            detail: { x, y, z, target: pickTarget },
           }))
           setPickMode(false)
-          toast.success(`Starting point set to (${x.toFixed(2)}, ${y.toFixed(2)}, ${z.toFixed(2)})`)
+          setPickTarget(null)
+          const label = pickTarget === 'caver' ? 'Starting point' : 'CPOINT'
+          toast.success(`${label} set to (${xs}, ${ys}, ${zs})`)
         }
       } catch { /* ignore */ }
     }
     const canvas = document.querySelector('canvas')
     canvas?.addEventListener('click', handleViewerClick)
     return () => canvas?.removeEventListener('click', handleViewerClick)
-  }, [pickMode])
+  }, [pickMode, pickTarget])
 
   // Fetch a structure from RCSB by its 4-character PDB ID.
   // The Python service proxies the request (avoids CORS) and returns the
@@ -415,7 +435,9 @@ export default function Home() {
           {pickMode && (
             <div className="mt-2 rounded-md border border-amber-400/40 bg-amber-50/50 px-3 py-1.5 text-xs text-amber-600 dark:bg-amber-950/20 dark:text-amber-400">
               <Crosshair className="mr-1.5 inline size-3" />
-              Click on the 3D structure to set the CAVER starting point
+              {pickTarget === 'hole-cpoint'
+                ? 'Click on the 3D structure to set the HOLE2 channel centre point (CPOINT)'
+                : 'Click on the 3D structure to set the CAVER starting point'}
             </div>
           )}
         </section>

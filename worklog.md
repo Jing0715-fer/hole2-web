@@ -478,3 +478,30 @@ Stage Summary:
 - 3D viewer renders tunnels as colored tubes + spheres per cluster
 - All output files available for download (log.txt, tunnel profiles, cluster CSVs, etc.)
 - Build successful, no lint errors, server running on port 3000
+
+---
+Task ID: 4
+Agent: main
+Task: Fix "Pick in 3D" bug (only z coordinate set, x/y reset to 0) + add Pick in 3D to HOLE2 cpoint
+
+Work Log:
+- Root cause analysis: CaverRunForm used `useState(() => {...})` (lazy initializer) to register a window event listener for `caver-point-picked`. This runs ONLY ONCE during the first render, capturing a STALE `set` function that references the INITIAL params (all zeros). When the event fired, three sequential `set('start_x', x)`, `set('start_y', y)`, `set('start_z', z)` calls each used `{...initialParams, [key]: value}` — each call OVERWROTE the previous one, and the LAST call (start_z) won, resetting x and y to 0.
+- Fix 1 (CaverRunForm): Removed the buggy `useState(() => {...})` listener entirely. Replaced with a proper `useEffect` that listens for `pick-point-done` events and ONLY resets the local `pickMode` state (does NOT call `set()` — page.tsx handles param updates directly via functional `setCaverParams`).
+- Fix 2 (Unified pick mechanism): Generalized the event system:
+  - `pick-point-start` event with `{ target: 'caver' | 'hole-cpoint', active }` — dispatched by either form's Pick button
+  - `pick-point-done` event with `{ x, y, z, target }` — dispatched by page.tsx after raycast, received by forms to reset button state
+  - page.tsx stores `pickTarget` and updates the CORRECT params: setCaverParams for 'caver', setParams for 'hole-cpoint'
+- Fix 3 (HOLE2 cpoint Pick in 3D): Added a "Pick in 3D" button to RunForm's CPOINT section (in advanced options). Uses the same unified mechanism — dispatches `pick-point-start` with `target: 'hole-cpoint'`, and page.tsx updates `cpoint_x/y/z` on canvas click.
+- Fix 4 (Stale server process): During testing, discovered a stale `next-server` process from before the rebuild was serving the OLD build. Killed it with `pkill -9 -f next` and restarted fresh.
+- Updated pick mode banner to show different text for CAVER ("set the CAVER starting point") vs HOLE2 ("set the HOLE2 channel centre point (CPOINT)").
+- Agent Browser verification:
+  - CAVER pick: clicked "Pick in 3D" → clicked on 3D structure → all 3 coordinates set correctly (x=1.27, y=7.23, z=8.22) ✅ (previously only z was set)
+  - HOLE2 cpoint pick: opened Advanced options → clicked "Pick in 3D" → clicked on 3D structure → all 3 cpoint values set correctly (x=1.27, y=7.23, z=8.22) ✅
+  - CAVER run with picked point: 1 tunnel found, 1 cluster, bottleneck 0.906 Å, tunnel rendered as yellow tube in 3D ✅
+  - Toast message: "Starting point set to (1.27, 7.23, 8.22)" ✅
+
+Stage Summary:
+- Pick in 3D bug fixed: stale closure in `useState(() => {})` replaced with proper `useEffect` + unified event system
+- HOLE2 cpoint now has "Pick in 3D" in advanced options — click on the 3D structure to set the channel centre point
+- Both modes (CAVER + HOLE2) share the same pick mechanism with target-specific param updates
+- Build successful, no lint errors, all interactions browser-verified

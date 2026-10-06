@@ -1,7 +1,7 @@
 'use client'
 
-import { useCallback, useRef, useState } from 'react'
-import { Upload, FileText, X, Settings2, Beaker, Download, Loader2 } from 'lucide-react'
+import { useCallback, useRef, useState, useEffect } from 'react'
+import { Upload, FileText, X, Settings2, Beaker, Download, Loader2, Crosshair } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -42,10 +42,32 @@ export function RunForm(props: RunFormProps) {
   const radInputRef = useRef<HTMLInputElement>(null)
   const [advancedOpen, setAdvancedOpen] = useState(false)
   const [pdbIdInput, setPdbIdInput] = useState('')
+  const [pickCpointMode, setPickCpointMode] = useState(false)
 
   const set = useCallback((patch: Partial<RunParams>) => {
     onParamsChange({ ...params, ...patch })
   }, [params, onParamsChange])
+
+  // Pick cpoint by clicking on the 3D viewer — tells page.tsx to activate
+  // the canvas click listener (the parent updates cpoint_x/y/z).
+  const handlePickCpoint = useCallback(() => {
+    setPickCpointMode(!pickCpointMode)
+    window.dispatchEvent(new CustomEvent('pick-point-start', {
+      detail: { target: 'hole-cpoint', active: !pickCpointMode },
+    }))
+  }, [pickCpointMode])
+
+  // When a point has been picked, reset the button label.
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const ce = e as CustomEvent
+      if (ce.detail?.target === 'hole-cpoint') {
+        setPickCpointMode(false)
+      }
+    }
+    window.addEventListener('pick-point-done', handler)
+    return () => window.removeEventListener('pick-point-done', handler)
+  }, [])
 
   const handlePdbPick = (file: File | null) => {
     if (!file) { onPdbFile(null, ''); return }
@@ -265,7 +287,18 @@ export function RunForm(props: RunFormProps) {
           <div className="space-y-3 rounded-lg border border-border/40 bg-muted/20 p-3">
             {/* cpoint */}
             <div className="space-y-1.5">
-              <Label className="text-xs font-medium">Channel centre point (CPOINT)</Label>
+              <div className="flex items-center justify-between">
+                <Label className="text-xs font-medium">Channel centre point (CPOINT)</Label>
+                <Button
+                  variant={pickCpointMode ? 'default' : 'ghost'}
+                  size="sm"
+                  className="h-6 gap-1 px-2 text-[10px]"
+                  onClick={handlePickCpoint}
+                >
+                  <Crosshair className="size-3" />
+                  {pickCpointMode ? 'Click in 3D…' : 'Pick in 3D'}
+                </Button>
+              </div>
               <div className="grid grid-cols-3 gap-2">
                 <Input type="number" step="0.1" placeholder="x" value={params.cpoint_x}
                   onChange={(e) => set({ cpoint_x: e.target.value })} className="h-8 font-mono text-xs" />
