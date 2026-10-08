@@ -6,6 +6,7 @@ const nextConfig: NextConfig = {
     ignoreBuildErrors: true,
   },
   reactStrictMode: false,
+  devIndicators: false,
   allowedDevOrigins: [
     "*.space-z.ai",
     "*.preview-chat-*.space-z.ai",

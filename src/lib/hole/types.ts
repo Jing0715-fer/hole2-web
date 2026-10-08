@@ -143,7 +143,7 @@ export const DEFAULT_PARAMS: RunParams = {
   cvect_x: '',
   cvect_y: '',
   cvect_z: '',
-  endrad: '5.0',
+  endrad: '15.0',
   shorto: '0',
   connolly: false,
   ignore_residues: '',
