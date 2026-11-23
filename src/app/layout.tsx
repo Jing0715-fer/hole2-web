@@ -45,13 +45,13 @@ export default function RootLayout({
   return (
     <html lang="en" suppressHydrationWarning>
       <head>
-        {/* Load three.js + TrackballControls from CDN.
-            Both are async but TrackballControls has an onload that sets
-            window.__tbReady = true so the viewer can detect readiness. */}
-        <script
-          src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"
-          async
-        ></script>
+        {/* Load three.js + TrackballControls from the local /public/vendor
+            directory (self-hosted — no external CDN dependency, so the
+            viewer works on restricted networks and offline).
+            TrackballControls needs THREE first, so the loader script waits
+            for it and then appends the controls, setting
+            window.__tbReady = true when both are ready. */}
+        <script src="/vendor/three.min.js" async></script>
         <script
           dangerouslySetInnerHTML={{
             __html: `
@@ -66,7 +66,7 @@ export default function RootLayout({
                 }
                 function checkTHREE() {
                   if (window.THREE) {
-                    loadScript('https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/TrackballControls.js', function() {
+                    loadScript('/vendor/TrackballControls.js', function() {
                       window.__tbReady = true;
                     });
                   } else {

@@ -592,3 +592,40 @@ Stage Summary:
 - Remote redesign + local CAVER/pick fixes successfully integrated
 - Both design languages and all features preserved
 - Server running on port 3000, page verified via Agent Browser
+
+---
+Task ID: 7
+Agent: main
+Task: Fix "three.js failed to load from the CDN within 30 s" error
+
+Work Log:
+- Root cause: three.js + TrackballControls were loaded from external CDNs
+  (cdnjs.cloudflare.com + cdn.jsdelivr.net). The server machine can reach
+  both, but the USER'S BROWSER could not (CDNs blocked/slow on restricted
+  networks) — after the 30 s retry window the viewer showed the error.
+- Fix: self-host both scripts under public/vendor/:
+  - public/vendor/three.min.js (603 KB, three.js r128)
+  - public/vendor/TrackballControls.js (17 KB, three@0.128.0 examples)
+  Static files in public/ are served as-is — no Turbopack compilation of
+  the 23 MB npm package (still avoiding the sandbox OOM), and same-origin
+  loading works on any network (restricted/offline).
+- Updated layout.tsx: script src now /vendor/three.min.js; the loader
+  inline script now injects /vendor/TrackballControls.js.
+- Updated Viewer3D.tsx + viewer.ts error messages/comments: no longer
+  mention "CDN" (now self-hosted).
+- Excluded public/**, vendor/**, mini-services/** from ESLint (the
+  downloaded minified JS triggered 26 no-this-alias errors + 1271 warnings).
+- Fixed local/remote divergence: the local worklog commit (a80d4f4) had
+  accidentally resurrected deleted mini-services files via `git add -A`;
+  re-applied the fix cleanly on top of origin/main (2136285) instead.
+- Verified with Agent Browser:
+  - window.THREE + window.THREE.TrackballControls load from local origin ✅
+  - 3D viewer renders gramicidin structure (tube cartoon, 272 atoms) ✅
+  - Full HOLE2 run: pore surface + centre line + profile chart + readouts
+    (Rmin 1.198 Å, G_macro 274.5 pS — matches ground truth) ✅
+  - No error overlay, no console errors ✅
+
+Stage Summary:
+- three.js is now self-hosted — the 3D viewer works on restricted networks
+  (no external CDN dependency) while still avoiding the Turbopack OOM.
+- Lint clean, build passes, browser-verified end-to-end.

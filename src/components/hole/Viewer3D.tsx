@@ -26,11 +26,12 @@ interface Viewer3DProps {
  * 3D viewer panel — mounts the three.js canvas, loads the PDB structure
  * + HOLE surface whenever the inputs change, and forwards option changes.
  *
- * The three.js library is loaded from a CDN script tag (layout.tsx), so the
- * viewer initialisation retries until `window.THREE` appears. Inputs that
- * arrive before the viewer is ready (structure text, HOLE results, option
- * changes) are stored in refs and replayed right after initialisation so a
- * slow CDN never silently drops a structure load.
+ * The three.js library is self-hosted at /vendor/three.min.js (see
+ * layout.tsx), so the viewer initialisation retries until `window.THREE`
+ * appears. Inputs that arrive before the viewer is ready (structure text,
+ * HOLE results, option changes) are stored in refs and replayed right
+ * after initialisation so a slow script load never silently drops a
+ * structure load.
  */
 export function Viewer3D({ pdbText, pdbName, spheres, surface, centreline, profile, caverTunnels, caverStartingPoint, options, bgColor, onReady }: Viewer3DProps) {
   const containerRef = useRef<HTMLDivElement>(null)
@@ -63,7 +64,7 @@ export function Viewer3D({ pdbText, pdbName, spheres, surface, centreline, profi
   useEffect(() => {
     if (!containerRef.current) return
 
-    // Wait for three.js to load from the CDN (layout.tsx adds the script tag)
+    // Wait for three.js to load (layout.tsx loads /vendor/three.min.js)
     let cancelled = false
     const initViewer = () => {
       if (cancelled || !containerRef.current) return
@@ -75,7 +76,7 @@ export function Viewer3D({ pdbText, pdbName, spheres, surface, centreline, profi
         initViewer.elapsed += 100
         if (initViewer.elapsed > 30000) {
           queueMicrotask(() => setErrorState({
-            msg: 'three.js failed to load from the CDN within 30 s — check your network and reload.',
+            msg: 'three.js failed to load within 30 s — reload the page and check the browser console for errors.',
             forText: pdbTextRef.current ?? '',
           }))
           return
@@ -86,7 +87,7 @@ export function Viewer3D({ pdbText, pdbName, spheres, surface, centreline, profi
       try {
         const v = new HoleViewer(containerRef.current)
         viewerRef.current = v
-        // Replay any state that arrived while the CDN script was loading —
+        // Replay any state that arrived while three.js was still loading —
         // without this a structure picked during the window would never be
         // loaded (the effects below no-op'd on the null viewer).
         try {

@@ -7,32 +7,32 @@
  *
  * 3D rendering approach inspired by MolVision (MIT, Jing0715-fer).
  *
- * three.js is loaded from a CDN (see layout.tsx) as `window.THREE` so the
- * dev server doesn't need to compile the 23 MB npm package — this avoids
- * OOM crashes in the sandbox's 4 GB cgroup.
+ * three.js is self-hosted at /vendor/three.min.js (see layout.tsx) and
+ * exposed as `window.THREE` so the dev server doesn't need to compile the
+ * 23 MB npm package — this avoids OOM crashes in the sandbox's 4 GB cgroup.
  */
 
-// THREE + TrackballControls are loaded from CDN script tags (see layout.tsx).
+// THREE + TrackballControls are loaded from /vendor/*.js script tags (see layout.tsx).
 function getTHREE(): any {
   if (typeof window === 'undefined') throw new Error('window not available (SSR)')
   const T = (window as any).THREE
-  if (!T) throw new Error('three.js CDN script not loaded yet')
+  if (!T) throw new Error('three.js script not loaded yet')
   return T
 }
 const THREE: any = new Proxy({} as any, {
   get(_t, prop) { return getTHREE()[prop] },
 })
 
-/** Create THREE.TrackballControls (from CDN).
+/** Create THREE.TrackballControls (self-hosted at /vendor/TrackballControls.js).
  *  TrackballControls uses quaternion-based rotation — NO spherical coordinates,
  *  NO poles, NO gimbal lock. Rotates freely in all directions. */
 function createControls(camera: any, domElement: HTMLElement): any {
   const T = getTHREE()
-  if (!T.TrackballControls) throw new Error('TrackballControls not loaded from CDN')
+  if (!T.TrackballControls) throw new Error('TrackballControls not loaded yet')
   return new T.TrackballControls(camera, domElement)
 }
 
-/** Wait for three.js + TrackballControls CDN scripts to load. */
+/** Wait for three.js + TrackballControls scripts to load. */
 function waitForTHREE(timeout = 15000): Promise<void> {
   return new Promise((resolve, reject) => {
     const start = Date.now()
@@ -42,7 +42,7 @@ function waitForTHREE(timeout = 15000): Promise<void> {
       if (T && T.TrackballControls) {
         resolve()
       } else if (Date.now() - start > timeout) {
-        reject(new Error('Timeout waiting for three.js + TrackballControls CDN'))
+        reject(new Error('Timeout waiting for three.js + TrackballControls to load'))
       } else {
         setTimeout(check, 50)
       }
